@@ -1,15 +1,28 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
+from sqlalchemy.orm import Session
+from Model.items import Item  
+from database.database import SessionLocal, engine
+
+# Criar a tabela no banco (caso não tenha sido criada via Alembic)
+Item.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
-@app.get("/")
-def read_root():
-    return {"message": "Bem-vindo ao FastAPI!"}
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-@app.get("/items/{item_id}")
-def read_item(item_id: int, q: str = None):
-    return {"item_id": item_id, "query": q}
+@app.post("/items/")
+def create_item(name: str, description: str, db: Session = Depends(get_db)):
+    new_item = Item(name=name, description=description)
+    db.add(new_item)
+    db.commit()
+    db.refresh(new_item)
+    return new_item
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+@app.get("/items/")
+def read_items(db: Session = Depends(get_db)):
+    return db.query(Item).all()
