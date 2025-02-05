@@ -15,6 +15,10 @@ def get_db():
     finally:
         db.close()
 
+@app.get("/items/")
+def read_items(db: Session = Depends(get_db)):
+    return db.query(Item).all()
+
 @app.post("/items/")
 def create_item(name: str, description: str, db: Session = Depends(get_db)):
     new_item = Item(name=name, description=description)
@@ -23,6 +27,3 @@ def create_item(name: str, description: str, db: Session = Depends(get_db)):
     db.refresh(new_item)
     return new_item
 
-@app.get("/items/")
-def read_items(db: Session = Depends(get_db)):
-    return db.query(Item).all()
