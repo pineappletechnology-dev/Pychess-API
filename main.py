@@ -172,9 +172,6 @@ def play_game(move: str):
         "board": stockfish.get_board_visual()
     }
 
-
-
-
 @app.get("/evaluate_position/",tags=['GAME'])
 def evaluate_position():
     """ Avalia a posição do tabuleiro com base nos movimentos feitos. """
@@ -323,46 +320,31 @@ def evaluate_training_move(fen: str, move: str):
 
 
 # ROTAS A SEREM USADAS AO PENSAR EM INTEGRAR COM O ROBO
-@app.get("/get_next_move/",tags=['ROBOT'])
-def get_next_move():
-    """Retorna o próximo movimento sugerido pelo Stockfish sem executar."""
-    best_move = stockfish.get_best_move()
-    if not best_move:
-        raise HTTPException(status_code=400, detail="Nenhuma jogada disponível!")
-    return {"best_move": best_move}
-
-@app.post("/confirm_robot_move/",tags=['ROBOT'])
-def confirm_robot_move(move: str):
-    """Confirma que o robô realizou a jogada."""
-    global game_moves
-    if not stockfish.is_move_correct(move):
-        raise HTTPException(status_code=400, detail="Movimento inválido!")
+@app.get("/get_position/{square}", tags=['ROBOT'])
+def get_position(square: str):
+    """ Converte uma posição do tabuleiro de xadrez (ex: 'h1') para coordenadas numéricas (x, y). """
     
-    game_moves.append(move)
-    stockfish.set_position(game_moves)
-    return {"message": "Jogada do robô confirmada!", "board": stockfish.get_board_visual()}
+    if len(square) != 2 or square[0] not in "abcdefgh" or square[1] not in "12345678":
+        raise HTTPException(status_code=400, detail="Posição inválida! Use notação padrão, ex: 'h1'.")
 
-@app.get("/game_status/",tags=['ROBOT'])
-def game_status():
-    """Retorna o status atual do jogo."""
-    evaluation = stockfish.get_evaluation()
-    return {
-        "moves": game_moves,
-        "evaluation": evaluation,
-        "board": stockfish.get_board_visual()
+    # Mapeamento das colunas (a-h) para valores X
+    column_map = {
+        "a": 1000, "b": 2000, "c": 3000, "d": 4000,
+        "e": 5000, "f": 6000, "g": 7000, "h": 8000
+    }
+    
+    # Mapeamento das linhas (1-8) para valores Y
+    row_map = {
+        "1": 1000, "2": 2000, "3": 3000, "4": 4000,
+        "5": 5000, "6": 6000, "7": 7000, "8": 8000
     }
 
-@app.post("/force_robot_move/",tags=['ROBOT'])
-def force_robot_move():
-    """Força o robô a fazer um movimento imediatamente."""
-    global game_moves
-    best_move = stockfish.get_best_move()
-    if not best_move:
-        raise HTTPException(status_code=400, detail="Nenhuma jogada disponível!")
-    
-    game_moves.append(best_move)
-    stockfish.set_position(game_moves)
-    return {"message": "Movimento do robô executado!", "move": best_move, "board": stockfish.get_board_visual()}
+    # Obtendo valores X e Y
+    x = column_map[square[0]]
+    y = row_map[square[1]]
+
+    return {"square": square, "x": x, "y": y}
+
 
 # TESTE DE MIGRATIONS COM SQLITE
 def get_db():
