@@ -22,6 +22,24 @@ stockfish.set_depth(15)  # Profundidade de busca
 
 # Variável para armazenar o histórico do jogo
 game_moves = []
+saved_games = {}
+
+def fen_to_matrix(fen):
+    """Converte um FEN em uma matriz 8x8 representando o tabuleiro."""
+    rows = fen.split(" ")[0].split("/")  # Pegamos apenas a parte do tabuleiro no FEN
+    board_matrix = []
+
+    for row in rows:
+        board_row = []
+        for char in row:
+            if char.isdigit():
+                board_row.extend(["."] * int(char))  # Espaços vazios
+            else:
+                board_row.append(char)  # Peça
+        board_matrix.append(board_row)
+
+    return board_matrix
+
 
 @app.post("/set_difficulty/",tags=['GAME'])
 def set_difficulty(level: str):
@@ -58,22 +76,6 @@ def start_game():
     stockfish.set_position(game_moves)
     return {"message": "Jogo iniciado!", "board": stockfish.get_board_visual()}
 
-@app.post("/reset_game/",tags=['GAME'])
-def reset_game():
-    """ Reinicia o jogo, apagando todas as jogadas. """
-    global game_moves
-    game_moves = []
-    stockfish.set_position(game_moves)
-    return {"message": "Jogo reiniciado!", "board": stockfish.get_board_visual()}
-
-saved_games = {}
-
-@app.post("/save_game/",tags=['GAME'])
-def save_game(game_id: str):
-    """ Salva o estado atual do jogo. """
-    saved_games[game_id] = list(game_moves)
-    return {"message": "Jogo salvo!", "game_id": game_id}
-
 @app.post("/load_game/",tags=['GAME'])
 def load_game(game_id: str):
     """ Carrega um jogo salvo. """
@@ -85,30 +87,93 @@ def load_game(game_id: str):
     stockfish.set_position(game_moves)
     return {"message": "Jogo carregado!", "board": stockfish.get_board_visual()}
 
-@app.post("/play_game/",tags=['GAME'])
+@app.get("/game_board/", tags=['GAME'])
+def get_game_board():
+    """ Retorna a matriz 8x8 representando o estado atual do jogo. """
+    board_visual = stockfish.get_board_visual().split("\n")  # Divide a saída em linhas
+
+    return {"board": board_visual}
+
+@app.post("/play_game/", tags=['GAME'])
 def play_game(move: str):
-    """ O usuário joga, e o Stockfish responde com a melhor jogada. """
+    """ O usuário joga, e o Stockfish responde com a melhor jogada, verificando capturas. """
     global game_moves
 
     if not stockfish.is_move_correct(move):
         raise HTTPException(status_code=400, detail="Movimento inválido!")
 
+    # Obtém o estado do tabuleiro antes da jogada do usuário
+    board_before = stockfish.get_fen_position()
+
     # Adiciona a jogada do usuário
     game_moves.append(move)
     stockfish.set_position(game_moves)
 
+    # Obtém o estado do tabuleiro depois da jogada do usuário
+    board_after = stockfish.get_fen_position()
+
+    # Converte FEN para matriz 8x8 antes e depois do movimento
+    board_matrix_before = fen_to_matrix(board_before)
+    board_matrix_after = fen_to_matrix(board_after)
+
+    # Verifica se houve captura pelo usuário
+    captured_piece_position = None
+    captured_piece = None
+    moved_piece = None
+    from_square, to_square = move[:2], move[2:]  # Exemplo: "e2e4" -> "e2" e "e4"
+
+    row_to, col_to = 8 - int(to_square[1]), ord(to_square[0]) - ord('a')  # Converte para índice da matriz
+
+    if board_matrix_before[row_to][col_to] != "." and board_matrix_after[row_to][col_to] != board_matrix_before[row_to][col_to]:
+        captured_piece_position = to_square
+        captured_piece = board_matrix_before[row_to][col_to]  # Peça capturada
+        moved_piece = board_matrix_after[row_to][col_to]  # Peça que ocupou a casa
+
     # Stockfish responde
     best_move = stockfish.get_best_move()
+    captured_piece_position_stockfish = None
+    captured_piece_stockfish = None
+    moved_piece_stockfish = None
+
     if best_move:
+        # Obtém o estado do tabuleiro antes do Stockfish jogar
+        board_before_stockfish = stockfish.get_fen_position()
+
         game_moves.append(best_move)
         stockfish.set_position(game_moves)
+
+        # Obtém o estado do tabuleiro depois da jogada do Stockfish
+        board_after_stockfish = stockfish.get_fen_position()
+
+        # Converte FEN para matriz 8x8 antes e depois do movimento do Stockfish
+        board_matrix_before_sf = fen_to_matrix(board_before_stockfish)
+        board_matrix_after_sf = fen_to_matrix(board_after_stockfish)
+
+        # Verifica se houve captura pelo Stockfish
+        from_square_sf, to_square_sf = best_move[:2], best_move[2:]
+
+        row_to_sf, col_to_sf = 8 - int(to_square_sf[1]), ord(to_square_sf[0]) - ord('a')
+
+        if board_matrix_before_sf[row_to_sf][col_to_sf] != "." and board_matrix_after_sf[row_to_sf][col_to_sf] != board_matrix_before_sf[row_to_sf][col_to_sf]:
+            captured_piece_position_stockfish = to_square_sf
+            captured_piece_stockfish = board_matrix_before_sf[row_to_sf][col_to_sf]  # Peça capturada pelo Stockfish
+            moved_piece_stockfish = board_matrix_after_sf[row_to_sf][col_to_sf]  # Peça que ficou no lugar
 
     return {
         "message": "Movimentos realizados!",
         "player_move": move,
+        "player_capture": captured_piece_position,
+        "captured_piece": captured_piece,
+        "moved_piece": moved_piece,
         "stockfish_move": best_move,
+        "stockfish_capture": captured_piece_position_stockfish,
+        "stockfish_captured_piece": captured_piece_stockfish,
+        "stockfish_moved_piece": moved_piece_stockfish,
         "board": stockfish.get_board_visual()
     }
+
+
+
 
 @app.get("/evaluate_position/",tags=['GAME'])
 def evaluate_position():
