@@ -2,11 +2,12 @@ from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
 from Model.items import Item  
 from database.database import SessionLocal, engine
-
 from stockfish import Stockfish
 
 import math
 import random
+import time
+import math
 
 # Criar a tabela no banco (caso não tenha sido criada via Alembic)
 Item.metadata.create_all(bind=engine)
@@ -52,6 +53,8 @@ def set_difficulty(level: str):
         "dificil": {"skill": 10, "depth": 14, "rating": 1200},
         "extremo": {"skill": 20, "depth": 22, "rating": "MAX"}
     }
+
+    level = level.lower()
     
     if level not in difficulty_settings:
         raise HTTPException(status_code=400, detail="Nível inválido! Escolha entre: muito_baixa, baixa, media, dificil, extremo.")
@@ -172,30 +175,45 @@ def play_game(move: str):
         "board": stockfish.get_board_visual()
     }
 
-@app.get("/evaluate_position/",tags=['GAME'])
+@app.get("/evaluate_position/", tags=['GAME'])
 def evaluate_position():
-    """ Avalia a posição do tabuleiro com base nos movimentos feitos. """
+    """ Avalia a posição do tabuleiro por 5 segundos, aumentando a profundidade da análise a cada segundo. """
     global game_moves
     stockfish.set_position(game_moves)  # Garante que estamos avaliando o estado atual
 
-    evaluation = stockfish.get_evaluation()
+    best_evaluation = None
+    best_depth = 0
 
-    if evaluation["type"] == "mate":
-        if evaluation["value"] > 0:
+    for depth in range(8, 8 + 5):  # Começa na profundidade 8 e vai até 12
+        stockfish.set_depth(depth)
+        evaluation = stockfish.get_evaluation()
+        
+        # Atualiza a melhor avaliação encontrada
+        if best_evaluation is None or abs(evaluation["value"]) > abs(best_evaluation["value"]):
+            best_evaluation = evaluation
+            best_depth = depth
+
+        time.sleep(1)  # Aguarda 1 segundo antes de aumentar a profundidade
+
+    # Verifica se houve xeque-mate
+    if best_evaluation["type"] == "mate":
+        if best_evaluation["value"] > 0:
             return {"winner": "Brancas", "win_probability": 100, "lose_probability": 0}
         else:
             return {"winner": "Pretas", "win_probability": 100, "lose_probability": 0}
 
     # Convertendo a vantagem do Stockfish para probabilidade de vitória
-    centipawns = evaluation["value"]
+    centipawns = best_evaluation["value"]
     win_probability = 1 / (1 + math.exp(-0.004 * centipawns)) * 100  # Fórmula de conversão
 
     return {
         "evaluation": centipawns,
+        "best_depth": best_depth,
         "win_probability_white": round(win_probability, 2),
         "win_probability_black": round(100 - win_probability, 2),
         "board": stockfish.get_board_visual()
     }
+
 
 @app.post("/analyze_move/",tags=['GAME'])
 def analyze_move(move: str):
