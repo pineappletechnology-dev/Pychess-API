@@ -26,6 +26,9 @@ stockfish.set_depth(15)  # Profundidade de busca
 game_moves = []
 saved_games = {}
 
+# Lista global para armazenar até 3 últimas partidas
+game_history = []
+
 def fen_to_matrix(fen):
     """Converte um FEN em uma matriz 8x8 representando o tabuleiro."""
     rows = fen.split(" ")[0].split("/")  # Pegamos apenas a parte do tabuleiro no FEN
@@ -252,6 +255,9 @@ def rating():
         else:
             rating += 5   # Jogada sólida
 
+        # Falta 1 detalhe mas será implementado apenas quando tiver o banco finalizado, comparar o novo rating com o antigo e fazer a soma
+        # sendo assim vamos estipular alguns valores para aumentar esse valor baseado na dificuldade e no desempenho do jogador
+
     return {
         "message": "Avaliação concluída!",
         "final_rating": max(0, rating),  # Evita rating negativo
@@ -357,6 +363,80 @@ def get_best_move_for_training(fen: str):
         explanation = "Essa jogada pode ser arriscada!"
     
     return {"best_move": best_move, "explanation": explanation, "board": stockfish.get_board_visual()}
+
+@app.post("/evaluate_progress/", tags=['GAME'])
+def evaluate_progress():
+    """Compara as três últimas partidas e verifica a evolução do jogador."""
+    global game_moves, game_history, stockfish
+
+    if not game_moves:
+        raise HTTPException(status_code=400, detail="Nenhuma partida registrada para avaliação.")
+
+    # Adiciona a última partida ao histórico
+    if len(game_history) >= 3:
+        game_history.pop(0)  # Remove a mais antiga para manter apenas 3 partidas
+
+    game_history.append(list(game_moves))  # Salva o jogo atual
+
+    if len(game_history) < 3:
+        return {"message": "Ainda não há partidas suficientes para análise. Jogue pelo menos 3 partidas!"}
+
+    def analyze_game(moves):
+        """Analisa uma partida e retorna estatísticas de qualidade."""
+        stockfish.set_position([])
+        good_moves, blunders, total_moves = 0, 0, len(moves)
+
+        for i, move in enumerate(moves):
+            stockfish.set_position(moves[:i + 1])
+
+            best_move = stockfish.get_best_move()
+            evaluation_before = stockfish.get_evaluation()
+            stockfish.make_moves_from_current_position([move])
+            evaluation_after = stockfish.get_evaluation()
+
+            eval_diff = evaluation_before["value"] - evaluation_after["value"]
+
+            if best_move == move:
+                good_moves += 1  # Jogada perfeita
+            elif eval_diff > 200:
+                blunders += 1  # Erro grave
+            elif eval_diff > 100:
+                blunders += 0.5  # Pequeno erro
+
+        return {
+            "good_moves": good_moves,
+            "blunders": blunders,
+            "total_moves": total_moves
+        }
+
+    # Analisa as três últimas partidas
+    analysis = [analyze_game(game) for game in game_history]
+
+    def calc_percentage_change(old, new):
+        """Calcula a porcentagem de mudança entre duas partidas."""
+        if old == 0:
+            return 100 if new > 0 else 0  # Se não houver referência anterior
+        return round(((new - old) / old) * 100, 2)
+
+    # Compara a última partida com as duas anteriores
+    progress = {
+        "improvement_from_last": {
+            "good_moves": calc_percentage_change(analysis[1]["good_moves"], analysis[2]["good_moves"]),
+            "blunders": calc_percentage_change(analysis[1]["blunders"], analysis[2]["blunders"]),
+            "total_moves": calc_percentage_change(analysis[1]["total_moves"], analysis[2]["total_moves"])
+        },
+        "improvement_from_two_games_ago": {
+            "good_moves": calc_percentage_change(analysis[0]["good_moves"], analysis[2]["good_moves"]),
+            "blunders": calc_percentage_change(analysis[0]["blunders"], analysis[2]["blunders"]),
+            "total_moves": calc_percentage_change(analysis[0]["total_moves"], analysis[2]["total_moves"])
+        }
+    }
+
+    return {
+        "message": "Comparação realizada!",
+        "progress": progress
+    }
+
 
 @app.post("/evaluate_training_move/",tags=['TRAINING'])
 def evaluate_training_move(fen: str, move: str):
