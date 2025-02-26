@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from Model.items import Item  
 from database.database import SessionLocal, engine
 from stockfish import Stockfish
+from typing import List
 
 import math
 import random
@@ -212,6 +213,49 @@ def evaluate_position():
         "win_probability_white": round(win_probability, 2),
         "win_probability_black": round(100 - win_probability, 2),
         "board": stockfish.get_board_visual()
+    }
+
+@app.post("/rating/", tags=['GAME'])
+def rating():
+    """Avalia o jogo completo armazenado em game_moves e gera um rating baseado na performance do jogador."""
+    global stockfish
+
+    if not game_moves:
+        raise HTTPException(status_code=400, detail="Nenhuma jogada registrada para avaliação.")
+
+    base_rating = 0  # Rating inicial do jogador. Obs: Quando for ligar com o banco de dados será o rating do jogador
+    rating = base_rating
+    
+    stockfish.set_position([])  # Reseta para o início da partida
+
+    for i, move in enumerate(game_moves):
+        if not stockfish.is_move_correct(move):
+            raise HTTPException(status_code=400, detail=f"Movimento inválido detectado: {move}")
+
+        stockfish.set_position(game_moves[:i + 1])  # Atualiza posição até a jogada atual
+
+        best_move = stockfish.get_best_move()  # Melhor jogada segundo Stockfish
+        evaluation_before = stockfish.get_evaluation()  # Avaliação antes do movimento
+        stockfish.make_moves_from_current_position([move])  # Aplica o movimento no Stockfish
+        evaluation_after = stockfish.get_evaluation()  # Avaliação depois do movimento
+        
+        eval_diff = evaluation_before["value"] - evaluation_after["value"]
+
+        if best_move == move:
+            rating += 15  # Jogada perfeita
+        elif eval_diff > 200:
+            rating -= 50  # Erro grave (Blunder)
+        elif eval_diff > 100:
+            rating -= 20  # Jogada imprecisa
+        elif eval_diff > 30:
+            rating -= 5   # Pequeno erro
+        else:
+            rating += 5   # Jogada sólida
+
+    return {
+        "message": "Avaliação concluída!",
+        "final_rating": max(0, rating),  # Evita rating negativo
+        "moves_analyzed": len(game_moves)
     }
 
 
