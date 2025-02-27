@@ -2,10 +2,12 @@ from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
 from database.database import SessionLocal, engine
 from stockfish import Stockfish
-from typing import List
+
+from passlib.hash import bcrypt_sha256 as bcrypt
+from database.database import get_db 
+from Model.users import User
 
 import math
-import random
 import time
 import math
 
@@ -424,11 +426,34 @@ def get_position(square: str):
 
     return {"square": square, "x": x, "y": y}
 
-
-# TESTE DE MIGRATIONS COM SQLITE
+# Rotas de conexão DB
 def get_db():
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+
+@app.post("/new-users/",tags=['DB'])
+def create_user(username: str, password: str, email: str, db: Session = Depends(get_db)):
+    if db.query(User).filter(User.username == username).first():
+        raise HTTPException(status_code=400, detail="Username already registered")
+    
+    hashed_password = bcrypt.hash(password)
+
+    new_user = User(username=username, password=hashed_password, email=email)
+    db.add(new_user)
+    db.commit()
+
+    return {
+        "message": "User created successfully", 
+        "id": new_user.id
+    }
+
+@app.post("/login/", tags=['DB'])
+def login(username: str, password: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == username).first()
+    if not user or not bcrypt.verify(password, user.password):
+        raise HTTPException(status_code=400, detail="Invalid username or password")
+    
+    return {"message": "Login successful", "id": user.id}
