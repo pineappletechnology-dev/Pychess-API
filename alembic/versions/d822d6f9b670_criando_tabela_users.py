@@ -24,6 +24,7 @@ def upgrade():
         sa.Column('id', sa.Integer(), nullable=False),
         sa.Column('username', sa.String(length=100), nullable=False),
         sa.Column('password', sa.String(length=100), nullable=False),
+        sa.Column('email', sa.String(length=100), nullable=False),
         sa.Column('wins', sa.Integer(), nullable=False, server_default='0'),
         sa.Column('losses', sa.Integer(), nullable=False, server_default='0'),
         sa.Column('total_games', sa.Integer(), nullable=False, server_default='0'),

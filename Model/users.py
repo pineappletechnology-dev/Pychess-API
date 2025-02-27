@@ -7,6 +7,7 @@ class User(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     username = Column(String(100), nullable=False, unique=True)
     password = Column(String(100), nullable=False)
+    email = Column(String(100), nullable=False)
     wins = Column(Integer, default=0)
     losses = Column(Integer, default=0)
     total_games = Column(Integer, default=0)

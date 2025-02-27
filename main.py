@@ -435,13 +435,13 @@ def get_db():
         db.close()
 
 @app.post("/new-users/",tags=['DB'])
-def create_user(username: str, password: str, db: Session = Depends(get_db)):
+def create_user(username: str, password: str, email: str, db: Session = Depends(get_db)):
     if db.query(User).filter(User.username == username).first():
         raise HTTPException(status_code=400, detail="Username already registered")
     
     hashed_password = bcrypt.hash(password)
 
-    new_user = User(username=username, password=hashed_password)
+    new_user = User(username=username, password=hashed_password, email=email)
     db.add(new_user)
     db.commit()
 
