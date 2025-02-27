@@ -1,6 +1,5 @@
 from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
-from Model.items import Item  
 from database.database import SessionLocal, engine
 from stockfish import Stockfish
 from typing import List
@@ -9,9 +8,6 @@ import math
 import random
 import time
 import math
-
-# Criar a tabela no banco (caso não tenha sido criada via Alembic)
-Item.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
@@ -329,41 +325,6 @@ def game_history():
     """ Retorna o histórico de jogadas do jogo atual. """
     return {"moves": game_moves}
 
-
-# MODO TREINO
-def generate_random_position():
-    """Gera uma posição de treino aleatória usando Stockfish."""
-    stockfish.set_position([])  # Começa do início
-    for _ in range(random.randint(10, 30)):
-        move = stockfish.get_best_move()
-        if not move:
-            break
-        stockfish.make_moves_from_current_position([move])
-    return stockfish.get_fen_position()
-
-@app.get("/generate_training_position/",tags=['TRAINING'])
-def generate_training_position():
-    """Gera uma posição aleatória de treino."""
-    fen = generate_random_position()
-    return {"training_position": fen}
-
-@app.post("/get_best_move_for_training/",tags=['TRAINING'])
-def get_best_move_for_training(fen: str):
-    """Retorna a melhor jogada para uma posição de treino e explica o motivo."""
-    stockfish.set_fen_position(fen)
-    best_move = stockfish.get_best_move()
-    eval_info = stockfish.get_evaluation()
-    
-    explanation = """Essa é a melhor jogada porque melhora sua posição estrategicamente."""
-    if eval_info["type"] == "mate":
-        explanation = "Essa jogada leva ao xeque-mate!"
-    elif eval_info["value"] > 100:
-        explanation = "Essa jogada garante uma vantagem sólida."
-    elif eval_info["value"] < -100:
-        explanation = "Essa jogada pode ser arriscada!"
-    
-    return {"best_move": best_move, "explanation": explanation, "board": stockfish.get_board_visual()}
-
 @app.post("/evaluate_progress/", tags=['GAME'])
 def evaluate_progress():
     """Compara as três últimas partidas e verifica a evolução do jogador."""
@@ -437,30 +398,6 @@ def evaluate_progress():
         "progress": progress
     }
 
-
-@app.post("/evaluate_training_move/",tags=['TRAINING'])
-def evaluate_training_move(fen: str, move: str):
-    """Avalia se o movimento do usuário foi bom e explica o impacto."""
-    stockfish.set_fen_position(fen)
-    
-    if not stockfish.is_move_correct(move):
-        return {"message": "Movimento inválido!", "evaluation": "Erro"}
-    
-    eval_before = stockfish.get_evaluation()
-    stockfish.make_moves_from_current_position([move])
-    eval_after = stockfish.get_evaluation()
-    
-    eval_diff = eval_after["value"] - eval_before["value"]
-    
-    classification = "Neutra"
-    if eval_diff > 50:
-        classification = "Boa jogada!"
-    elif eval_diff < -50:
-        classification = "Movimento ruim!"
-    
-    return {"move": move, "classification": classification, "board": stockfish.get_board_visual()}
-
-
 # ROTAS A SEREM USADAS AO PENSAR EM INTEGRAR COM O ROBO
 @app.get("/get_position/{square}", tags=['ROBOT'])
 def get_position(square: str):
@@ -495,15 +432,3 @@ def get_db():
         yield db
     finally:
         db.close()
-
-@app.get("/items/", tags=['DB'])
-def read_items(db: Session = Depends(get_db)):
-    return db.query(Item).all()
-
-@app.post("/items/", tags=['DB'])
-def create_item(name: str, description: str, db: Session = Depends(get_db)):
-    new_item = Item(name=name, description=description)
-    db.add(new_item)
-    db.commit()
-    db.refresh(new_item)
-    return new_item

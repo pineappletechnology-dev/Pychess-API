@@ -1,15 +1,19 @@
-from sqlalchemy import create_engine, Column, Integer, String
+from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
-# Conexão com o SQLite (arquivo database.db)
-SQLALCHEMY_DATABASE_URL = "sqlite:///./database.db"
+DATABASE_URL = "sqlite:///./xadrez.db"
 
-# Criar o engine
-engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 
-# Criar sessão
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# Base para os modelos
 Base = declarative_base()
+
+# Dependência para usar o banco nas rotas
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
