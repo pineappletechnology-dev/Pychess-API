@@ -1,19 +1,65 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Security
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.openapi.models import APIKey
+from fastapi.openapi.utils import get_openapi
 from sqlalchemy.orm import Session
 from database.database import SessionLocal, engine
 from stockfish import Stockfish
 
-from passlib.hash import bcrypt_sha256 as bcrypt
+from passlib.hash import bcrypt
 from database.database import get_db 
+from datetime import datetime, timedelta
+from dotenv import load_dotenv
 from Model.users import User
 
+import jwt
 import math
 import time
 import math
+import os
 
-app = FastAPI()
+app = FastAPI(
+    title="Minha API",
+    description="API com autenticação JWT",
+    version="1.0",
+    openapi_tags=[{"name": "DB", "description": "Rotas que acessam o banco de dados"}],
+    openapi_url="/openapi.json",
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
+
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    openapi_schema = get_openapi(
+        title="Minha API",
+        version="1.0",
+        description="API com autenticação JWT",
+        routes=app.routes,
+    )
+    openapi_schema["components"] = {
+        "securitySchemes": {
+            "BearerAuth": {
+                "type": "http",
+                "scheme": "bearer",
+                "bearerFormat": "JWT"
+            }
+        }
+    }
+    openapi_schema["security"] = [{"BearerAuth": []}]
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi
+
+load_dotenv()
 
 STOCKFISH_PATH = r"C:\Users\joao.silva\OneDrive - Allparts Componentes Ltda\Documentos\GitHub\Pychess-API\stockfish\stockfish-windows-x86-64-avx2.exe"
+SECRET_KEY = os.getenv("SECRET_KEY")
+ALGORITHM = os.getenv("ALGORITHM")
+
+security = HTTPBearer()
 
 # Inicializa o motor Stockfish
 stockfish = Stockfish(STOCKFISH_PATH)
@@ -42,6 +88,26 @@ def fen_to_matrix(fen):
         board_matrix.append(board_row)
 
     return board_matrix
+
+def get_current_user(credentials: HTTPAuthorizationCredentials = Security(security), db: Session = Depends(get_db)):
+    token = credentials.credentials
+
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        
+        user_id = payload.get("id")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+
+        return user
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
 
 
 @app.post("/set_difficulty/",tags=['GAME'])
@@ -455,5 +521,19 @@ def login(username: str, password: str, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == username).first()
     if not user or not bcrypt.verify(password, user.password):
         raise HTTPException(status_code=400, detail="Invalid username or password")
+
+    # Gerar token JWT
+    expiration = datetime.utcnow() + timedelta(hours=1)
+    token = jwt.encode({"id": user.id, "exp": expiration}, str(SECRET_KEY), algorithm=ALGORITHM)
     
-    return {"message": "Login successful", "id": user.id}
+    return {"message": "Login successful", "token": token}
+
+@app.get("/user-session/", tags=['DB'])
+def get_user_info(user: User = Depends(get_current_user)):
+    return {
+        "id": user.id,
+        "username": user.username,
+        "wins": user.wins,
+        "losses": user.losses,
+        "total_games": user.total_games
+    }
