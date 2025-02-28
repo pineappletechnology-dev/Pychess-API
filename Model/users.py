@@ -11,3 +11,4 @@ class User(Base):
     wins = Column(Integer, default=0)
     losses = Column(Integer, default=0)
     total_games = Column(Integer, default=0)
+    rating = Column(Integer, default=0)

@@ -111,7 +111,6 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Security(securi
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-
 @app.post("/set_difficulty/",tags=['GAME'])
 def set_difficulty(level: str):
     """Define o nível de dificuldade do Stockfish"""
@@ -244,7 +243,6 @@ def play_game(move: str, db: Session = Depends(get_db)):
 
     # Verifica se existe um jogo ativo
     game = db.query(Game).filter(Game.player_win == 0).first()
-
     if not game:
         raise HTTPException(status_code=400, detail="Nenhum jogo ativo encontrado!")
 
@@ -255,25 +253,44 @@ def play_game(move: str, db: Session = Depends(get_db)):
     if not stockfish.is_move_correct(move):
         raise HTTPException(status_code=400, detail="Movimento inválido!")
 
+    # Obtém o estado do tabuleiro antes da jogada do usuário
+    board_before = stockfish.get_fen_position()
+
     # Adiciona a jogada do usuário
     game_moves.append(move)
     stockfish.set_position(game_moves)
 
-    # Estado do tabuleiro após o movimento do jogador
-    board = stockfish.get_fen_position()
+    # Obtém o estado do tabuleiro depois da jogada do usuário
+    board_after = stockfish.get_fen_position()
 
+    # Converte FEN para matriz 8x8 antes e depois do movimento
+    board_matrix_before = fen_to_matrix(board_before)
+    board_matrix_after = fen_to_matrix(board_after)
+
+    # Verifica se houve captura pelo usuário
+    captured_piece_position = None
+    captured_piece = None
+    moved_piece = None
+    from_square, to_square = move[:2], move[2:]  # Exemplo: "e2e4" -> "e2" e "e4"
+
+    row_to, col_to = 8 - int(to_square[1]), ord(to_square[0]) - ord('a')
+
+    if board_matrix_before[row_to][col_to] != "." and board_matrix_after[row_to][col_to] != board_matrix_before[row_to][col_to]:
+        captured_piece_position = to_square
+        captured_piece = board_matrix_before[row_to][col_to]
+        moved_piece = board_matrix_after[row_to][col_to]
+
+    # Análise da jogada
     analysis = analyze_move(move, db)
-
-    move_quality = analysis["move_quality"]
-    # classification = analysis["classification"]
+    classification = analysis["classification"]
 
     # Salva o movimento do jogador no banco de dados
     new_move = Move(
         is_player=True,
         move=move,
-        board_string=board,
-        mv_quality=move_quality,
-        game_id=game.id
+        board_string=board_after,
+        mv_quality=classification,
+        game_id=game.id,
     )
     db.add(new_move)
     db.commit()
@@ -281,12 +298,33 @@ def play_game(move: str, db: Session = Depends(get_db)):
     # Stockfish responde com o melhor movimento
     best_move = stockfish.get_best_move()
 
+    captured_piece_position_stockfish = None
+    captured_piece_stockfish = None
+    moved_piece_stockfish = None
+
     if best_move:
+        # Obtém o estado do tabuleiro antes da jogada do Stockfish
+        board_before_stockfish = stockfish.get_fen_position()
+
         game_moves.append(best_move)
         stockfish.set_position(game_moves)
 
-        # Estado do tabuleiro após o movimento do Stockfish
+        # Obtém o estado do tabuleiro depois da jogada do Stockfish
         board_after_stockfish = stockfish.get_fen_position()
+
+        # Converte FEN para matriz 8x8 antes e depois do movimento do Stockfish
+        board_matrix_before_sf = fen_to_matrix(board_before_stockfish)
+        board_matrix_after_sf = fen_to_matrix(board_after_stockfish)
+
+        # Verifica se houve captura pelo Stockfish
+        from_square_sf, to_square_sf = best_move[:2], best_move[2:]
+
+        row_to_sf, col_to_sf = 8 - int(to_square_sf[1]), ord(to_square_sf[0]) - ord('a')
+
+        if board_matrix_before_sf[row_to_sf][col_to_sf] != "." and board_matrix_after_sf[row_to_sf][col_to_sf] != board_matrix_before_sf[row_to_sf][col_to_sf]:
+            captured_piece_position_stockfish = to_square_sf
+            captured_piece_stockfish = board_matrix_before_sf[row_to_sf][col_to_sf]
+            moved_piece_stockfish = board_matrix_after_sf[row_to_sf][col_to_sf]
 
         # Salva o movimento do Stockfish no banco de dados
         stockfish_move = Move(
@@ -294,7 +332,7 @@ def play_game(move: str, db: Session = Depends(get_db)):
             move=best_move,
             board_string=board_after_stockfish,
             mv_quality=None,
-            game_id=game.id
+            game_id=game.id,
         )
         db.add(stockfish_move)
         db.commit()
@@ -302,9 +340,13 @@ def play_game(move: str, db: Session = Depends(get_db)):
     return {
         "message": "Movimentos realizados!",
         "player_move": move,
+        "player_capture": captured_piece_position,
         "stockfish_move": best_move,
+        "stockfish_capture": captured_piece_position_stockfish,
         "board": stockfish.get_board_visual()
     }
+
+
 
 @app.get("/evaluate_position/", tags=['GAME'])
 def evaluate_position(db: Session = Depends(get_db)):
