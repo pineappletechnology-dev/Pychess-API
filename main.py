@@ -295,6 +295,23 @@ def play_game(move: str, db: Session = Depends(get_db)):
     db.add(new_move)
     db.commit()
 
+    # Verifica xeque-mate após o movimento do jogador
+    if stockfish.is_mate():
+        game.player_win = 1  # Brancas vencem
+        db.commit()
+        return {
+            "message": "Xeque-mate! Brancas venceram!",
+            "player_move": move,
+            "player_capture": captured_piece_position,
+            "captured_piece": captured_piece,
+            "moved_piece": moved_piece,
+            "stockfish_move": None,
+            "stockfish_capture": None,
+            "stockfish_captured_piece": None,
+            "stockfish_moved_piece": None,
+            "board": stockfish.get_board_visual()
+        }
+
     # Stockfish responde com o melhor movimento
     best_move = stockfish.get_best_move()
 
@@ -336,6 +353,23 @@ def play_game(move: str, db: Session = Depends(get_db)):
         )
         db.add(stockfish_move)
         db.commit()
+
+        # Verifica xeque-mate após o movimento do Stockfish
+        if stockfish.is_mate():
+            game.player_win = 2  # Pretas vencem
+            db.commit()
+            return {
+                "message": "Xeque-mate! Pretas venceram!",
+                "player_move": move,
+                "player_capture": captured_piece_position,
+                "captured_piece": captured_piece,
+                "moved_piece": moved_piece,
+                "stockfish_move": best_move,
+                "stockfish_capture": captured_piece_position_stockfish,
+                "stockfish_captured_piece": captured_piece_stockfish,
+                "stockfish_moved_piece": moved_piece_stockfish,
+                "board": stockfish.get_board_visual()
+            }
 
     return {
         "message": "Movimentos realizados!",
@@ -395,17 +429,33 @@ def evaluate_position(db: Session = Depends(get_db)):
     }
 
 @app.post("/rating/", tags=['GAME'])
-def rating():
-    """Avalia o jogo completo armazenado em game_moves e gera um rating baseado na performance do jogador."""
+def rating(user_id: int, db: Session = Depends(get_db)):
+    """Avalia o jogo completo armazenado em game_moves e atualiza o rating do jogador no banco de dados."""
+
     global stockfish
 
+    game = db.query(Game).filter(Game.player_win == 0).first()
+
+    if not game:
+        raise HTTPException(status_code=400, detail="Nenhum jogo ativo encontrado!")
+
+    # Obtém os movimentos já registrados no banco para este jogo
+    game_moves = db.query(Move.move).filter(Move.game_id == game.id).all()
+    game_moves = [m.move for m in game_moves]  # Transformando em lista de strings
+
+    # Verifica se há jogadas para avaliar
     if not game_moves:
         raise HTTPException(status_code=400, detail="Nenhuma jogada registrada para avaliação.")
 
-    base_rating = 0  # Rating inicial do jogador. Obs: Quando for ligar com o banco de dados será o rating do jogador
-    rating = base_rating
-    
-    stockfish.set_position([])  # Reseta para o início da partida
+    # Busca o usuário e seu rating atual
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado!")
+
+    base_rating = user.rating  # Rating atual do jogador
+    rating = base_rating  # Inicializa o rating com o valor do banco
+
+    stockfish.set_position([])  # Reseta o Stockfish para o início da partida
 
     for i, move in enumerate(game_moves):
         if not stockfish.is_move_correct(move):
@@ -431,14 +481,31 @@ def rating():
         else:
             rating += 5   # Jogada sólida
 
-        # Falta 1 detalhe mas será implementado apenas quando tiver o banco finalizado, comparar o novo rating com o antigo e fazer a soma
-        # sendo assim vamos estipular alguns valores para aumentar esse valor baseado na dificuldade e no desempenho do jogador
+    # Garante que o rating final não fique negativo
+    final_rating = max(0, rating)
+
+    # Calcula a diferença entre o rating final e o atual do jogador
+    rating_diff = final_rating - base_rating
+
+    # Atualiza o rating no banco de dados conforme a diferença
+    if rating_diff >= 200:
+        user.rating += 100
+    elif rating_diff >= 100:
+        user.rating += 70
+    elif rating_diff >= 20:
+        user.rating += 50
+    elif rating_diff > 0:
+        user.rating += 20
+
+    db.commit()  # Salva a atualização no banco
 
     return {
         "message": "Avaliação concluída!",
-        "final_rating": max(0, rating),  # Evita rating negativo
+        "final_rating": final_rating,
+        "rating_updated": user.rating,  # Retorna o novo rating do jogador
         "moves_analyzed": len(game_moves)
     }
+
 
 
 @app.post("/analyze_move/",tags=['GAME'])
