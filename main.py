@@ -2,14 +2,15 @@ from fastapi import FastAPI, Depends, HTTPException, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.openapi.models import APIKey
 from fastapi.openapi.utils import get_openapi
+from sqlalchemy import desc
 from sqlalchemy.orm import Session
 from database.database import SessionLocal, engine
 from stockfish import Stockfish
-
 from passlib.hash import bcrypt
 from database.database import get_db 
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+
 from Model.users import User
 from Model.games import Game
 from Model.moves import Move
@@ -578,8 +579,17 @@ def analyze_move(move: str,  db: Session = Depends(get_db)):
     }
 
 @app.get("/game_history/",tags=['GAME'])
-def game_history():
+def game_history(db: Session = Depends(get_db)):
     """ Retorna o histórico de jogadas do jogo atual. """
+    game = db.query(Game).filter(Game.player_win == 0).first()
+
+    if not game:
+        raise HTTPException(status_code=400, detail="Nenhum jogo ativo encontrado!")
+
+    # Obtém os movimentos já registrados no banco para este jogo
+    game_moves = db.query(Move.move).filter(Move.game_id == game.id).all()
+    game_moves = [m.move for m in game_moves]  # Transformando em lista de strings
+
     return {"moves": game_moves}
 
 @app.post("/evaluate_progress/", tags=['GAME'])
@@ -704,6 +714,18 @@ def create_user(username: str, password: str, email: str, db: Session = Depends(
         "message": "User created successfully", 
         "id": new_user.id
     }
+
+@app.get("/get-users/", tags=['DB'])
+def get_users(db: Session = Depends(get_db)):
+    users = db.query(User).order_by(desc(User.rating)).all()
+
+    return [
+        {
+            "username": user.username,
+            "rating": user.rating
+        }
+        for user in users
+    ]
 
 @app.post("/login/", tags=['DB'])
 def login(username: str, password: str, db: Session = Depends(get_db)):
