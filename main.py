@@ -9,6 +9,8 @@ from stockfish import Stockfish
 from passlib.hash import bcrypt
 from database.database import get_db 
 from datetime import datetime, timedelta
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
 
 from Model.users import User
@@ -20,6 +22,7 @@ import math
 import time
 import math
 import os
+import smtplib
 
 app = FastAPI(
     title="Minha API",
@@ -72,6 +75,39 @@ stockfish.set_depth(15)  # Profundidade de busca
 # Variável para armazenar o histórico do jogo
 game_moves = []
 saved_games = {}
+
+def create_reset_token(email: str):
+    """ Gera um token JWT para redefinição de senha """
+    expire = datetime.utcnow() + timedelta(minutes=30)
+    data = {"sub": email, "exp": expire}
+    return jwt.encode(data, SECRET_KEY, algorithm=ALGORITHM)
+
+def send_reset_email(email: str, token: str):
+    """ Envia o e-mail com o link para redefinir senha """
+    reset_link = f"http://localhost:8000/reset-password?token={token}"
+    
+    msg = MIMEMultipart()
+    msg["From"] = os.getenv("SMTP_EMAIL")
+    msg["To"] = email
+    msg["Subject"] = "Redefinição de Senha"
+    
+    body = f"""
+    <p>Olá,</p>
+    <p>Você solicitou a redefinição de senha. Clique no link abaixo para redefinir sua senha:</p>
+    <p><a href="{reset_link}">Redefinir Senha</a></p>
+    <p>Este link expira em {30} minutos.</p>
+    """
+    
+    msg.attach(MIMEText(body, "html"))
+
+    try:
+        server = smtplib.SMTP(os.getenv("SMTP_SERVER"), os.getenv("SMTP_PORT"))
+        server.starttls()
+        server.login(os.getenv("SMTP_EMAIL"), os.getenv("SMTP_PASSWORD"))
+        server.sendmail(os.getenv("SMTP_EMAIL"), email, msg.as_string())
+        server.quit()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao enviar e-mail: {str(e)}")
 
 # Lista global para armazenar até 3 últimas partidas
 game_history = []
@@ -748,3 +784,19 @@ def get_user_info(user: User = Depends(get_current_user)):
         "losses": user.losses,
         "total_games": user.total_games
     }
+
+@app.post("/forgot-password/")
+def forgot_password(email: str, db: Session = Depends(get_db)):
+    """ Verifica se o e-mail existe e envia um link de recuperação """
+    user = db.query(User).filter(User.email == email).first()
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="E-mail não encontrado.")
+    
+    # Gerar token de redefinição de senha
+    reset_token = create_reset_token(email)
+    
+    # Enviar e-mail com link
+    send_reset_email(email, reset_token)
+    
+    return {"message": "E-mail de redefinição de senha enviado!"}
