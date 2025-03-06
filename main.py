@@ -287,24 +287,25 @@ def play_game(move: str, db: Session = Depends(get_db)):
     game_moves = db.query(Move.move).filter(Move.game_id == game.id).all()
     game_moves = [m.move for m in game_moves]  # Transformando em lista de strings
 
+    # Verifica se o movimento do jogador é válido
     if not stockfish.is_move_correct(move):
-        raise HTTPException(status_code=400, detail="Movimento inválido!")
+        raise HTTPException(status_code=400, detail="Movimento do jogador inválido!")
 
     # Obtém o estado do tabuleiro antes da jogada do usuário
     board_before = stockfish.get_fen_position()
 
-    # Adiciona a jogada do usuário
+    # Adiciona a jogada do jogador
     game_moves.append(move)
     stockfish.set_position(game_moves)
 
-    # Obtém o estado do tabuleiro depois da jogada do usuário
+    # Obtém o estado do tabuleiro depois da jogada do jogador
     board_after = stockfish.get_fen_position()
 
     # Converte FEN para matriz 8x8 antes e depois do movimento
     board_matrix_before = fen_to_matrix(board_before)
     board_matrix_after = fen_to_matrix(board_after)
 
-    # Verifica se houve captura pelo usuário
+    # Verifica se houve captura pelo jogador
     captured_piece_position = None
     captured_piece = None
     moved_piece = None
@@ -332,10 +333,15 @@ def play_game(move: str, db: Session = Depends(get_db)):
     db.add(new_move)
     db.commit()
 
+    evaluation = stockfish.get_evaluation()
+
     # Verifica xeque-mate após o movimento do jogador
-    if stockfish.is_mate():
+    if evaluation['type'] == 'mate':
         game.player_win = 1  # Brancas vencem
         db.commit()
+
+        rating(game.user_id)
+
         return {
             "message": "Xeque-mate! Brancas venceram!",
             "player_move": move,
@@ -351,6 +357,9 @@ def play_game(move: str, db: Session = Depends(get_db)):
 
     # Stockfish responde com o melhor movimento
     best_move = stockfish.get_best_move()
+
+    if not stockfish.is_move_correct(best_move):
+        raise HTTPException(status_code=400, detail="Movimento do Stockfish inválido!")
 
     captured_piece_position_stockfish = None
     captured_piece_stockfish = None
@@ -392,9 +401,13 @@ def play_game(move: str, db: Session = Depends(get_db)):
         db.commit()
 
         # Verifica xeque-mate após o movimento do Stockfish
-        if stockfish.is_mate():
+        if evaluation['type'] == 'mate':
             game.player_win = 2  # Pretas vencem
+
             db.commit()
+
+            rating(game.user_id)
+
             return {
                 "message": "Xeque-mate! Pretas venceram!",
                 "player_move": move,
@@ -416,7 +429,6 @@ def play_game(move: str, db: Session = Depends(get_db)):
         "stockfish_capture": captured_piece_position_stockfish,
         "board": stockfish.get_board_visual()
     }
-
 
 
 @app.get("/evaluate_position/", tags=['GAME'])
@@ -444,7 +456,7 @@ def evaluate_position(db: Session = Depends(get_db)):
             best_evaluation = evaluation
             best_depth = depth
 
-        time.sleep(1)  # Aguarda 1 segundo antes de aumentar a profundidade
+        time.sleep(1) 
 
     # Verifica se houve xeque-mate
     if best_evaluation["type"] == "mate":
@@ -508,7 +520,7 @@ def rating(user_id: int, db: Session = Depends(get_db)):
         eval_diff = evaluation_before["value"] - evaluation_after["value"]
 
         if best_move == move:
-            rating += 15  # Jogada perfeita
+            rating += 50  # Jogada perfeita
         elif eval_diff > 200:
             rating -= 50  # Erro grave (Blunder)
         elif eval_diff > 100:
@@ -534,16 +546,14 @@ def rating(user_id: int, db: Session = Depends(get_db)):
     elif rating_diff > 0:
         user.rating += 20
 
-    db.commit()  # Salva a atualização no banco
+    db.commit()
 
     return {
         "message": "Avaliação concluída!",
         "final_rating": final_rating,
-        "rating_updated": user.rating,  # Retorna o novo rating do jogador
+        "rating_updated": user.rating, 
         "moves_analyzed": len(game_moves)
     }
-
-
 
 @app.post("/analyze_move/",tags=['GAME'])
 def analyze_move(move: str,  db: Session = Depends(get_db)):
@@ -785,7 +795,7 @@ def get_user_info(user: User = Depends(get_current_user)):
         "total_games": user.total_games
     }
 
-@app.post("/forgot-password/")
+@app.post("/forgot-password/", tags=['DB'])
 def forgot_password(email: str, db: Session = Depends(get_db)):
     """ Verifica se o e-mail existe e envia um link de recuperação """
     user = db.query(User).filter(User.email == email).first()
