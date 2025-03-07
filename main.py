@@ -253,23 +253,23 @@ def get_game_state_per_moviment(game_id: int, move_number: int, db: Session = De
 
 @app.get("/game_board/", tags=['GAME'])
 def get_game_board(db: Session = Depends(get_db)):
-    """ Retorna a matriz 8x8 representando o estado atual do jogo com base nos movimentos salvos no banco. """
+    """ Retorna a visualização do tabuleiro baseado no último estado salvo no banco. """
 
     # Obtém o último jogo ativo (onde player_win == 0)
     game = db.query(Game).filter(Game.player_win == 0).order_by(Game.id.desc()).first()
-
     if not game:
         raise HTTPException(status_code=404, detail="Nenhum jogo ativo encontrado.")
 
-    # Obtém todos os movimentos associados ao jogo, na ordem em que foram feitos
-    moves = db.query(Move.move).filter(Move.game_id == game.id).order_by(Move.id).all()
-    moves = [m.move for m in moves]
+    # Obtém o último estado do tabuleiro salvo no banco (última jogada)
+    last_move = db.query(Move.board_string).filter(Move.game_id == game.id).order_by(Move.id.desc()).first()
+    if not last_move:
+        raise HTTPException(status_code=404, detail="Nenhuma jogada encontrada para este jogo.")
 
-    # Define a posição do Stockfish com base nesses movimentos
-    stockfish.set_position(moves)
+    # Define a posição do Stockfish com base no último FEN salvo
+    stockfish.set_fen_position(last_move.board_string)
 
-    # Retorna o tabuleiro atualizado
-    board_visual = stockfish.get_board_visual().split("\n")  # Divide a saída em linhas
+    # Obtém o tabuleiro no formato visual do Stockfish
+    board_visual = stockfish.get_board_visual().split("\n")
 
     return {"board": board_visual}
 
@@ -287,10 +287,6 @@ def play_game(move: str, db: Session = Depends(get_db)):
     game_moves = db.query(Move.move).filter(Move.game_id == game.id).all()
     game_moves = [m.move for m in game_moves]  # Transformando em lista de strings
 
-    # Verifica se o movimento do jogador é válido
-    if not stockfish.is_move_correct(move):
-        raise HTTPException(status_code=400, detail="Movimento do jogador inválido!")
-
     # Obtém o estado do tabuleiro antes da jogada do usuário
     board_before = stockfish.get_fen_position()
 
@@ -298,6 +294,14 @@ def play_game(move: str, db: Session = Depends(get_db)):
     game_moves.append(move)
     stockfish.set_position(game_moves)
 
+    # Verifica se o movimento do jogador é válido
+    if not stockfish.is_move_correct(move):
+        raise HTTPException(status_code=400, detail="Movimento do jogador inválido!")
+    
+    # Se a posição não mudou, significa que o movimento foi inválido
+    # if stockfish.get_fen_position() == board_before:
+    #     raise HTTPException(status_code=400, detail="Movimento do jogador inválido!")
+    
     # Obtém o estado do tabuleiro depois da jogada do jogador
     board_after = stockfish.get_fen_position()
 
@@ -358,8 +362,8 @@ def play_game(move: str, db: Session = Depends(get_db)):
     # Stockfish responde com o melhor movimento
     best_move = stockfish.get_best_move()
 
-    if not stockfish.is_move_correct(best_move):
-        raise HTTPException(status_code=400, detail="Movimento do Stockfish inválido!")
+    if not best_move or not stockfish.is_move_correct(best_move):
+        raise HTTPException(status_code=400, detail="Movimento inválido gerado pelo Stockfish!")
 
     captured_piece_position_stockfish = None
     captured_piece_stockfish = None
