@@ -2,6 +2,7 @@ from fastapi import FastAPI, Depends, HTTPException, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.openapi.models import APIKey
 from fastapi.openapi.utils import get_openapi
+from concurrent.futures import ThreadPoolExecutor
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 from database.database import SessionLocal, engine
@@ -290,10 +291,6 @@ def play_game(move: str, db: Session = Depends(get_db)):
     # Obtém o estado do tabuleiro antes da jogada do usuário
     board_before = stockfish.get_fen_position()
 
-    # Adiciona a jogada do jogador
-    game_moves.append(move)
-    stockfish.set_position(game_moves)
-
     # Verifica se o movimento do jogador é válido
     if not stockfish.is_move_correct(move):
         raise HTTPException(status_code=400, detail="Movimento do jogador inválido!")
@@ -301,6 +298,10 @@ def play_game(move: str, db: Session = Depends(get_db)):
     # Se a posição não mudou, significa que o movimento foi inválido
     # if stockfish.get_fen_position() == board_before:
     #     raise HTTPException(status_code=400, detail="Movimento do jogador inválido!")
+
+    # Adiciona a jogada do jogador
+    game_moves.append(move)
+    stockfish.set_position(game_moves)
     
     # Obtém o estado do tabuleiro depois da jogada do jogador
     board_after = stockfish.get_fen_position()
@@ -433,7 +434,6 @@ def play_game(move: str, db: Session = Depends(get_db)):
         "stockfish_capture": captured_piece_position_stockfish,
         "board": stockfish.get_board_visual()
     }
-
 
 @app.get("/evaluate_position/", tags=['GAME'])
 def evaluate_position(db: Session = Depends(get_db)):
