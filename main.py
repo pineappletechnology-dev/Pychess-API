@@ -24,6 +24,8 @@ import time
 import math
 import os
 import smtplib
+import chess
+import chess.engine
 
 app = FastAPI(
     title="Minha API",
@@ -74,8 +76,7 @@ stockfish.set_skill_level(10)  # Ajuste o nível de habilidade (0-20)
 stockfish.set_depth(15)  # Profundidade de busca
 
 # Variável para armazenar o histórico do jogo
-game_moves = []
-saved_games = {}
+board = chess.Board()
 
 def create_reset_token(email: str):
     """ Gera um token JWT para redefinição de senha """
@@ -256,183 +257,135 @@ def get_game_state_per_moviment(game_id: int, move_number: int, db: Session = De
 def get_game_board(db: Session = Depends(get_db)):
     """ Retorna a visualização do tabuleiro baseado no último estado salvo no banco. """
 
-    # Obtém o último jogo ativo (onde player_win == 0)
-    game = db.query(Game).filter(Game.player_win == 0).order_by(Game.id.desc()).first()
-    if not game:
-        raise HTTPException(status_code=404, detail="Nenhum jogo ativo encontrado.")
+    # Obtém o último jogo ativo e seu último movimento em uma única consulta
+    last_game = (
+        db.query(Game.id, Move.board_string)
+        .join(Move, Move.game_id == Game.id)
+        .filter(Game.player_win == 0)
+        .order_by(Game.id.desc(), Move.id.desc())
+        .first()
+    )
 
-    # Obtém o último estado do tabuleiro salvo no banco (última jogada)
-    last_move = db.query(Move.board_string).filter(Move.game_id == game.id).order_by(Move.id.desc()).first()
-    if not last_move:
-        raise HTTPException(status_code=404, detail="Nenhuma jogada encontrada para este jogo.")
+    if not last_game:
+        raise HTTPException(status_code=404, detail="Nenhum jogo ativo ou jogada encontrada.")
 
-    # Define a posição do Stockfish com base no último FEN salvo
-    stockfish.set_fen_position(last_move.board_string)
+    game_id, fen_string = last_game
 
-    # Obtém o tabuleiro no formato visual do Stockfish
-    board_visual = stockfish.get_board_visual().split("\n")
+    # Validação do FEN antes de enviar para o Stockfish
+    if not fen_string or len(fen_string.split()) != 6:
+        raise HTTPException(status_code=400, detail="FEN inválido no banco de dados.")
 
-    return {"board": board_visual}
+    # Define a posição no Stockfish
+    try:
+        stockfish.set_fen_position(fen_string)
+        board_visual = stockfish.get_board_visual()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao processar tabuleiro: {str(e)}")
 
+    if not board_visual:
+        raise HTTPException(status_code=500, detail="Falha ao gerar visualização do tabuleiro.")
+
+    return {"board": board_visual.split("\n")}
 
 @app.post("/play_game/", tags=['GAME'])
 def play_game(move: str, db: Session = Depends(get_db)):
     """ O usuário joga, e o Stockfish responde com a melhor jogada, verificando capturas. """
 
-    # Verifica se existe um jogo ativo
+    # Verifica se há um jogo ativo
     game = db.query(Game).filter(Game.player_win == 0).first()
     if not game:
         raise HTTPException(status_code=400, detail="Nenhum jogo ativo encontrado!")
 
-    # Obtém os movimentos já registrados no banco para este jogo
-    game_moves = db.query(Move.move).filter(Move.game_id == game.id).all()
-    game_moves = [m.move for m in game_moves]  # Transformando em lista de strings
+    # Obtém o último estado salvo do tabuleiro
+    last_move = db.query(Move).filter(Move.game_id == game.id).order_by(Move.id.desc()).first()
 
-    # Obtém o estado do tabuleiro antes da jogada do usuário
-    board_before = stockfish.get_fen_position()
+    # Se houver um estado salvo, carregamos ele; caso contrário, criamos um novo tabuleiro
+    board = chess.Board(last_move.board_string) if last_move and last_move.board_string else chess.Board()
 
-    # Verifica se o movimento do jogador é válido
-    if not stockfish.is_move_correct(move):
+    # Verifica se a jogada do jogador é válida
+    if move not in [m.uci() for m in board.legal_moves]:
         raise HTTPException(status_code=400, detail="Movimento do jogador inválido!")
-    
-    # Se a posição não mudou, significa que o movimento foi inválido
-    # if stockfish.get_fen_position() == board_before:
-    #     raise HTTPException(status_code=400, detail="Movimento do jogador inválido!")
 
-    # Adiciona a jogada do jogador
-    game_moves.append(move)
-    stockfish.set_position(game_moves)
-    
-    # Obtém o estado do tabuleiro depois da jogada do jogador
-    board_after = stockfish.get_fen_position()
+    # Aplica o movimento do jogador no tabuleiro
+    board.push(chess.Move.from_uci(move))
 
-    # Converte FEN para matriz 8x8 antes e depois do movimento
-    board_matrix_before = fen_to_matrix(board_before)
-    board_matrix_after = fen_to_matrix(board_after)
-
-    # Verifica se houve captura pelo jogador
-    captured_piece_position = None
-    captured_piece = None
-    moved_piece = None
-    from_square, to_square = move[:2], move[2:]  # Exemplo: "e2e4" -> "e2" e "e4"
-
-    row_to, col_to = 8 - int(to_square[1]), ord(to_square[0]) - ord('a')
-
-    if board_matrix_before[row_to][col_to] != "." and board_matrix_after[row_to][col_to] != board_matrix_before[row_to][col_to]:
-        captured_piece_position = to_square
-        captured_piece = board_matrix_before[row_to][col_to]
-        moved_piece = board_matrix_after[row_to][col_to]
+    # Atualiza o Stockfish com o novo estado do jogo
+    stockfish.set_fen_position(board.fen())
 
     # Análise da jogada
     analysis = analyze_move(move, db)
     classification = analysis["classification"]
 
-    # Salva o movimento do jogador no banco de dados
+    # Salva o movimento do jogador no banco
     new_move = Move(
         is_player=True,
         move=move,
-        board_string=board_after,
+        board_string=board.fen(),
         mv_quality=classification,
         game_id=game.id,
     )
     db.add(new_move)
     db.commit()
 
-    evaluation = stockfish.get_evaluation()
-
     # Verifica xeque-mate após o movimento do jogador
-    if evaluation['type'] == 'mate':
-        game.player_win = 1  # Brancas vencem
+    if board.is_checkmate():
+        game.player_win = 1  # Brancas venceram
         db.commit()
-
         rating(game.user_id)
 
         return {
             "message": "Xeque-mate! Brancas venceram!",
+            "board_fen": board.fen(),
             "player_move": move,
-            "player_capture": captured_piece_position,
-            "captured_piece": captured_piece,
-            "moved_piece": moved_piece,
-            "stockfish_move": None,
-            "stockfish_capture": None,
-            "stockfish_captured_piece": None,
-            "stockfish_moved_piece": None,
-            "board": stockfish.get_board_visual()
+            "stockfish_move": None
         }
 
     # Stockfish responde com o melhor movimento
     best_move = stockfish.get_best_move()
-
-    if not best_move or not stockfish.is_move_correct(best_move):
-        raise HTTPException(status_code=400, detail="Movimento inválido gerado pelo Stockfish!")
-
-    captured_piece_position_stockfish = None
-    captured_piece_stockfish = None
-    moved_piece_stockfish = None
-
     if best_move:
-        # Obtém o estado do tabuleiro antes da jogada do Stockfish
-        board_before_stockfish = stockfish.get_fen_position()
+        stockfish_move = chess.Move.from_uci(best_move)
 
-        game_moves.append(best_move)
-        stockfish.set_position(game_moves)
+        # Se for válido, aplicamos no tabuleiro
+        if stockfish_move in board.legal_moves:
+            board.push(stockfish_move)
+            stockfish.set_fen_position(board.fen())
 
-        # Obtém o estado do tabuleiro depois da jogada do Stockfish
-        board_after_stockfish = stockfish.get_fen_position()
-
-        # Converte FEN para matriz 8x8 antes e depois do movimento do Stockfish
-        board_matrix_before_sf = fen_to_matrix(board_before_stockfish)
-        board_matrix_after_sf = fen_to_matrix(board_after_stockfish)
-
-        # Verifica se houve captura pelo Stockfish
-        from_square_sf, to_square_sf = best_move[:2], best_move[2:]
-
-        row_to_sf, col_to_sf = 8 - int(to_square_sf[1]), ord(to_square_sf[0]) - ord('a')
-
-        if board_matrix_before_sf[row_to_sf][col_to_sf] != "." and board_matrix_after_sf[row_to_sf][col_to_sf] != board_matrix_before_sf[row_to_sf][col_to_sf]:
-            captured_piece_position_stockfish = to_square_sf
-            captured_piece_stockfish = board_matrix_before_sf[row_to_sf][col_to_sf]
-            moved_piece_stockfish = board_matrix_after_sf[row_to_sf][col_to_sf]
-
-        # Salva o movimento do Stockfish no banco de dados
-        stockfish_move = Move(
-            is_player=False,
-            move=best_move,
-            board_string=board_after_stockfish,
-            mv_quality=None,
-            game_id=game.id,
-        )
-        db.add(stockfish_move)
-        db.commit()
-
-        # Verifica xeque-mate após o movimento do Stockfish
-        if evaluation['type'] == 'mate':
-            game.player_win = 2  # Pretas vencem
-
+            # Salva a jogada do Stockfish
+            sf_move = Move(
+                is_player=False,
+                move=best_move,
+                board_string=board.fen(),
+                game_id=game.id,
+                mv_quality=None,
+            )
+            db.add(sf_move)
             db.commit()
 
-            rating(game.user_id)
+            # Verifica xeque-mate após a jogada do Stockfish
+            if board.is_checkmate():
+                game.player_win = 2  # Pretas venceram
+                db.commit()
+                rating(game.user_id)
 
+                return {
+                    "message": "Xeque-mate! Pretas venceram!",
+                    "board_fen": board.fen(),
+                    "player_move": move,
+                    "stockfish_move": best_move
+                }
+        else:
             return {
-                "message": "Xeque-mate! Pretas venceram!",
+                "message": "Movimento do Stockfish inválido. Tentando novamente...",
+                "board_fen": board.fen(),
                 "player_move": move,
-                "player_capture": captured_piece_position,
-                "captured_piece": captured_piece,
-                "moved_piece": moved_piece,
-                "stockfish_move": best_move,
-                "stockfish_capture": captured_piece_position_stockfish,
-                "stockfish_captured_piece": captured_piece_stockfish,
-                "stockfish_moved_piece": moved_piece_stockfish,
-                "board": stockfish.get_board_visual()
+                "stockfish_move": None
             }
 
     return {
         "message": "Movimentos realizados!",
+        "board_fen": board.fen(),
         "player_move": move,
-        "player_capture": captured_piece_position,
-        "stockfish_move": best_move,
-        "stockfish_capture": captured_piece_position_stockfish,
-        "board": stockfish.get_board_visual()
+        "stockfish_move": best_move
     }
 
 @app.get("/evaluate_position/", tags=['GAME'])
