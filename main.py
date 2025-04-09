@@ -751,7 +751,7 @@ def get_db():
     finally:
         db.close()
 
-@app.post("/new-users/",tags=['DB'])
+@app.post("/register/",tags=['DB'])
 def create_user(username: str, password: str, email: str, db: Session = Depends(get_db)):
     if db.query(User).filter(User.username == username).first():
         raise HTTPException(status_code=400, detail="Username already registered")
