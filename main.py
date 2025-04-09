@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.models import APIKey
 from fastapi.openapi.utils import get_openapi
 from concurrent.futures import ThreadPoolExecutor
@@ -13,6 +14,7 @@ from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
+from pydantic import BaseModel
 
 from Model.users import User
 from Model.games import Game
@@ -35,6 +37,22 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
+origins = [
+    "http://localhost:3000",
+]
+# Adiciona o middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,            # Ou use ["*"] para tudo (dev)
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+class UserRegister(BaseModel):
+    username: str
+    password: str
+    email: str
 
 def custom_openapi():
     if app.openapi_schema:
@@ -752,13 +770,15 @@ def get_db():
         db.close()
 
 @app.post("/register/",tags=['DB'])
-def create_user(username: str, password: str, email: str, db: Session = Depends(get_db)):
-    if db.query(User).filter(User.username == username).first():
+def create_user(payload: UserRegister, db: Session = Depends(get_db)):
+    print("payload", payload)
+    
+    if db.query(User).filter(User.username == payload.username).first():
         raise HTTPException(status_code=400, detail="Username already registered")
     
-    hashed_password = bcrypt.hash(password)
+    hashed_password = bcrypt.hash(payload.password)
 
-    new_user = User(username=username, password=hashed_password, email=email)
+    new_user = User(username=payload.username, password=hashed_password, email=payload.email)
     db.add(new_user)
     db.commit()
 
