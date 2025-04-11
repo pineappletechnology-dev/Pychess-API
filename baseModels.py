@@ -6,14 +6,15 @@ class UserRegister(BaseModel):
     email: str
     user_id: str
 
-class sfDifficulty(BaseModel):
+class SfDifficulty(BaseModel):
     level: str
 
-class game(BaseModel):
+class Game(BaseModel):
     game_id: str
     user_id: str
     fen: str
-    moves: list
+    move: list
     result: str
     difficulty: str
     time: int
+    moveNumber: int

@@ -53,3 +53,6 @@ def getUserByFilter(filters: dict, db: Session = Depends(get_db)):
         if hasattr(User, key):
             query = query.filter(getattr(User, key) == value)
     return query.first()
+
+def getUserById(user_id: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == user_id).first()

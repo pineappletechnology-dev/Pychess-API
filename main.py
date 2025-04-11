@@ -152,7 +152,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Security(securi
         raise HTTPException(status_code=401, detail="Invalid token")
 
 @app.post("/set_difficulty/", tags=['GAME'])
-def set_difficulty(payload: baseModels.sfDifficulty, db: Session = Depends(get_db)):
+def set_difficulty(payload: baseModels.SfDifficulty, db: Session = Depends(get_db)):
     """Define o nível de dificuldade do Stockfish"""
 
     difficulty = gameMethods.setStockfishDifficultyLevel(payload.level)
@@ -177,7 +177,7 @@ def start_game(payload: baseModels.UserRegister, db: Session = Depends(get_db)):
     return {"message": "Jogo iniciado!", "game_id": new_game.id, "board": stockfish.get_board_visual()}
 
 @app.post("/load_game/", tags=['GAME'])
-def load_game(payload: baseModels.game, db: Session = Depends(get_db)):
+def load_game(payload: baseModels.Game, db: Session = Depends(get_db)):
     gameMethods.loadGame(payload.game_id, db)
 
     return {
@@ -186,216 +186,34 @@ def load_game(payload: baseModels.game, db: Session = Depends(get_db)):
     }
 
 @app.get("/game_state_per_moviment/", tags=['GAME'])
-def get_game_state_per_moviment(game_id: int, move_number: int, db: Session = Depends(get_db)):
-    """ Retorna o estado do tabuleiro após um número específico de jogadas. """
-    
-    # Busca o jogo pelo ID
-    game = db.query(Game).filter(Game.id == game_id).first()
-    if not game:
-        raise HTTPException(status_code=404, detail="Jogo não encontrado!")
+def get_game_state_per_moviment(payload: baseModels.Game, db: Session = Depends(get_db)):
 
-    # Obtém os movimentos até o número especificado
-    moves = (
-        db.query(Move.move)
-        .filter(Move.game_id == game.id)
-        .order_by(Move.id)
-        .limit(move_number)
-        .all()
-    )
-    moves = [m.move for m in moves]  # Converte para lista de strings
-
-    # Se não houver jogadas, retorna o tabuleiro inicial
-    if not moves:
-        stockfish.set_position([])  # Reseta o tabuleiro
-    else:
-        stockfish.set_position(moves)
+    gameMethods.getGameState(payload.game_id, payload.move_number, db)
 
     return {
-        "message": f"Jogo {game_id} após {move_number} jogadas.",
+        "message": f"Jogo {payload.game_id} após {payload.move_number} jogadas.",
         "board": stockfish.get_board_visual().split("\n")  # Divide para exibição
     }
 
 
 @app.get("/game_board/", tags=['GAME'])
 def get_game_board(db: Session = Depends(get_db)):
-    """ Retorna a visualização do tabuleiro baseado no último estado salvo no banco. """
-
-    # Obtém o último jogo ativo (onde player_win == 0)
-    game = db.query(Game).filter(Game.player_win == 0).order_by(Game.id.desc()).first()
-    if not game:
-        raise HTTPException(status_code=404, detail="Nenhum jogo ativo encontrado.")
-
-    # Obtém o último estado do tabuleiro salvo no banco (última jogada)
-    last_move = db.query(Move.board_string).filter(Move.game_id == game.id).order_by(Move.id.desc()).first()
-    if not last_move:
-        raise HTTPException(status_code=404, detail="Nenhuma jogada encontrada para este jogo.")
-
-    # Define a posição do Stockfish com base no último FEN salvo
-    stockfish.set_fen_position(last_move.board_string)
-
-    # Obtém o tabuleiro no formato visual do Stockfish
-    board_visual = stockfish.get_board_visual().split("\n")
+    board_visual = gameMethods.getGameBoard(db)
 
     return {"board": board_visual}
 
 
 @app.post("/play_game/", tags=['GAME'])
-def play_game(move: str, db: Session = Depends(get_db)):
+def play_game(payload: baseModels.Game, db: Session = Depends(get_db)):
     """ O usuário joga, e o Stockfish responde com a melhor jogada, verificando capturas. """
-
-    # Verifica se existe um jogo ativo
-    game = db.query(Game).filter(Game.player_win == 0).first()
-    if not game:
-        raise HTTPException(status_code=400, detail="Nenhum jogo ativo encontrado!")
-
-    # Obtém os movimentos já registrados no banco para este jogo
-    game_moves = db.query(Move.move).filter(Move.game_id == game.id).all()
-    game_moves = [m.move for m in game_moves]  # Transformando em lista de strings
-
-    # Obtém o estado do tabuleiro antes da jogada do usuário
-    board_before = stockfish.get_fen_position()
-
-    # Verifica se o movimento do jogador é válido
-    if not stockfish.is_move_correct(move):
-        raise HTTPException(status_code=400, detail="Movimento do jogador inválido!")
+    playing = gameMethods.playGame(payload.move, db)
     
-    # Se a posição não mudou, significa que o movimento foi inválido
-    # if stockfish.get_fen_position() == board_before:
-    #     raise HTTPException(status_code=400, detail="Movimento do jogador inválido!")
-
-    # Adiciona a jogada do jogador
-    game_moves.append(move)
-    stockfish.set_position(game_moves)
-    
-    # Obtém o estado do tabuleiro depois da jogada do jogador
-    board_after = stockfish.get_fen_position()
-
-    # Converte FEN para matriz 8x8 antes e depois do movimento
-    board_matrix_before = gameMethods.fenToMatrix(board_before)
-    board_matrix_after = gameMethods.fenToMatrix(board_after)
-
-    # Verifica se houve captura pelo jogador
-    captured_piece_position = None
-    captured_piece = None
-    moved_piece = None
-    from_square, to_square = move[:2], move[2:]  # Exemplo: "e2e4" -> "e2" e "e4"
-
-    row_to, col_to = 8 - int(to_square[1]), ord(to_square[0]) - ord('a')
-
-    if board_matrix_before[row_to][col_to] != "." and board_matrix_after[row_to][col_to] != board_matrix_before[row_to][col_to]:
-        captured_piece_position = to_square
-        captured_piece = board_matrix_before[row_to][col_to]
-        moved_piece = board_matrix_after[row_to][col_to]
-
-    # Análise da jogada
-    analysis = analyze_move(move, db)
-    classification = analysis["classification"]
-
-    # Salva o movimento do jogador no banco de dados
-    new_move = Move(
-        is_player=True,
-        move=move,
-        board_string=board_after,
-        mv_quality=classification,
-        game_id=game.id,
-    )
-    db.add(new_move)
-    db.commit()
-
-    evaluation = stockfish.get_evaluation()
-
-    # Verifica xeque-mate após o movimento do jogador
-    if evaluation['type'] == 'mate':
-        game.player_win = 1  # Brancas vencem
-        db.commit()
-
-        rating(game.user_id)
-
-        return {
-            "message": "Xeque-mate! Brancas venceram!",
-            "player_move": move,
-            "player_capture": captured_piece_position,
-            "captured_piece": captured_piece,
-            "moved_piece": moved_piece,
-            "stockfish_move": None,
-            "stockfish_capture": None,
-            "stockfish_captured_piece": None,
-            "stockfish_moved_piece": None,
-            "board": stockfish.get_board_visual()
-        }
-
-    # Stockfish responde com o melhor movimento
-    best_move = stockfish.get_best_move()
-
-    if not best_move or not stockfish.is_move_correct(best_move):
-        raise HTTPException(status_code=400, detail="Movimento inválido gerado pelo Stockfish!")
-
-    captured_piece_position_stockfish = None
-    captured_piece_stockfish = None
-    moved_piece_stockfish = None
-
-    if best_move:
-        # Obtém o estado do tabuleiro antes da jogada do Stockfish
-        board_before_stockfish = stockfish.get_fen_position()
-
-        game_moves.append(best_move)
-        stockfish.set_position(game_moves)
-
-        # Obtém o estado do tabuleiro depois da jogada do Stockfish
-        board_after_stockfish = stockfish.get_fen_position()
-
-        # Converte FEN para matriz 8x8 antes e depois do movimento do Stockfish
-        board_matrix_before_sf = gameMethods.fenToMatrix(board_before_stockfish)
-        board_matrix_after_sf = gameMethods.fenToMatrix(board_after_stockfish)
-
-        # Verifica se houve captura pelo Stockfish
-        from_square_sf, to_square_sf = best_move[:2], best_move[2:]
-
-        row_to_sf, col_to_sf = 8 - int(to_square_sf[1]), ord(to_square_sf[0]) - ord('a')
-
-        if board_matrix_before_sf[row_to_sf][col_to_sf] != "." and board_matrix_after_sf[row_to_sf][col_to_sf] != board_matrix_before_sf[row_to_sf][col_to_sf]:
-            captured_piece_position_stockfish = to_square_sf
-            captured_piece_stockfish = board_matrix_before_sf[row_to_sf][col_to_sf]
-            moved_piece_stockfish = board_matrix_after_sf[row_to_sf][col_to_sf]
-
-        # Salva o movimento do Stockfish no banco de dados
-        stockfish_move = Move(
-            is_player=False,
-            move=best_move,
-            board_string=board_after_stockfish,
-            mv_quality=None,
-            game_id=game.id,
-        )
-        db.add(stockfish_move)
-        db.commit()
-
-        # Verifica xeque-mate após o movimento do Stockfish
-        if evaluation['type'] == 'mate':
-            game.player_win = 2  # Pretas vencem
-
-            db.commit()
-
-            rating(game.user_id)
-
-            return {
-                "message": "Xeque-mate! Pretas venceram!",
-                "player_move": move,
-                "player_capture": captured_piece_position,
-                "captured_piece": captured_piece,
-                "moved_piece": moved_piece,
-                "stockfish_move": best_move,
-                "stockfish_capture": captured_piece_position_stockfish,
-                "stockfish_captured_piece": captured_piece_stockfish,
-                "stockfish_moved_piece": moved_piece_stockfish,
-                "board": stockfish.get_board_visual()
-            }
-
     return {
         "message": "Movimentos realizados!",
-        "player_move": move,
-        "player_capture": captured_piece_position,
-        "stockfish_move": best_move,
-        "stockfish_capture": captured_piece_position_stockfish,
+        "player_move": payload.move,
+        "player_capture": playing.captured_piece_position,
+        "stockfish_move": playing.best_move,
+        "stockfish_capture": playing.captured_piece_position_stockfish,
         "board": stockfish.get_board_visual()
     }
 
@@ -524,71 +342,16 @@ def rating(user_id: int, db: Session = Depends(get_db)):
     }
 
 @app.post("/analyze_move/",tags=['GAME'])
-def analyze_move(move: str,  db: Session = Depends(get_db)):
-    """ Analisa a jogada, comparando com a melhor possível. """
-
-     # Verifica se existe um jogo ativo
-    game = db.query(Game).filter(Game.player_win == 0).first()
-
-    if not game:
-        raise HTTPException(status_code=400, detail="Nenhum jogo ativo encontrado!")
-
-    # Obtém os movimentos já registrados no banco para este jogo
-    game_moves = db.query(Move.move).filter(Move.game_id == game.id).all()
-    game_moves = [m.move for m in game_moves]  # Transformando em lista de strings
-
-    stockfish.set_position(game_moves)
-
-    # Obtém a melhor jogada recomendada pelo Stockfish
-    best_move = stockfish.get_best_move()
-
-    if not stockfish.is_move_correct(move):
-        raise HTTPException(status_code=400, detail="Movimento inválido!")
-
-    # Avaliação antes da jogada
-    eval_before = stockfish.get_evaluation()
-    eval_before_score = eval_before["value"] if eval_before["type"] == "cp" else 0
-
-    # Aplica o movimento do usuário
-    game_moves.append(move)
-    stockfish.set_position(game_moves)
-
-    # Avaliação após a jogada
-    eval_after = stockfish.get_evaluation()
-    eval_after_score = eval_after["value"] if eval_after["type"] == "cp" else 0
-
-    # Desfaz o movimento do usuário e testa a melhor jogada do Stockfish
-    game_moves.pop()
-    stockfish.set_position(game_moves)
-    game_moves.append(best_move)
-    stockfish.set_position(game_moves)
-
-    # Avaliação após a melhor jogada do Stockfish
-    eval_best = stockfish.get_evaluation()
-    eval_best_score = eval_best["value"] if eval_best["type"] == "cp" else 0
-
-    # Calcula a diferença entre as avaliações
-    diff_user = eval_after_score - eval_before_score  # O quanto a jogada do usuário melhorou ou piorou a posição
-    diff_best = eval_best_score - eval_before_score  # O quanto a melhor jogada melhoraria a posição
-    diff_to_best = diff_user - diff_best  # Diferença entre a jogada do usuário e a melhor jogada
-
-    # Classificação da jogada
-    if diff_to_best == 0:
-        classification = "Brilhante 💎"
-    elif -30 <= diff_to_best < 0:
-        classification = "Boa ✅"
-    elif -100 <= diff_to_best < -30:
-        classification = "Ok 🤷"
-    else:
-        classification = "Gafe ❌"
+def analyze_move(payload: baseModels.Game,  db: Session = Depends(get_db)):
+    analyzed = gameMethods.analyzeMove(payload.move, db)
 
     return {
-        "move": move,
-        "best_move": best_move,
-        "evaluation_before": eval_before_score,
-        "evaluation_after": eval_after_score,
-        "evaluation_best_move": eval_best_score,
-        "classification": classification,
+        "move": payload.move,
+        "best_move": analyzed.best_move,
+        "evaluation_before": analyzed.eval_before_score,
+        "evaluation_after": analyzed.eval_after_score,
+        "evaluation_best_move": analyzed.eval_best_score,
+        "classification": analyzed.classification,
         "board": stockfish.get_board_visual()
     }
 
