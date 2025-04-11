@@ -611,9 +611,18 @@ def game_history(db: Session = Depends(get_db)):
     return {"moves": game_moves}
 
 @app.post("/evaluate_progress/", tags=['GAME'])
-def evaluate_progress():
+def evaluate_progress(db: Session = Depends(get_db)):
     """Compara as três últimas partidas e verifica a evolução do jogador."""
-    global game_moves, game_history, stockfish
+    global game_history
+
+    game = db.query(Game).filter(Game.player_win == 0).first()
+
+    if not game:
+        raise HTTPException(status_code=400, detail="Nenhum jogo ativo encontrado!")
+
+    # Obtém os movimentos já registrados no banco para este jogo
+    game_moves = db.query(Move.move).filter(Move.game_id == game.id).all()
+    game_moves = [m.move for m in game_moves]  # Transformando em lista de strings
 
     if not game_moves:
         raise HTTPException(status_code=400, detail="Nenhuma partida registrada para avaliação.")
@@ -779,10 +788,25 @@ def get_user_info(user: User = Depends(get_current_user)):
     return {
         "id": user.id,
         "username": user.username,
+        "email": user.email,
         "wins": user.wins,
         "losses": user.losses,
-        "total_games": user.total_games
+        "total_games": user.total_games,
+        "rating": user.rating,
     }
+
+@app.get("/user-history/", tags=['DB'])
+def get_user_history(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    games = db.query(Game).filter(Game.user_id == user.id).where(Game.player_win != 0).order_by(Game.id.desc()).all()
+
+    return [
+        {
+            "id": game.id,
+            "game": f"{user.username} vs PyChessy", 
+            "result": "Vitória" if game.player_win == 1 else "Derrota",  
+        }
+        for game in games
+    ]
 
 @app.post("/forgot-password/", tags=['DB'])
 def forgot_password(email: str, db: Session = Depends(get_db)):
