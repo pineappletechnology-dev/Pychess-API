@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, Security
+from fastapi import FastAPI, Depends, HTTPException, Security, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.openapi.models import APIKey
 from fastapi.openapi.utils import get_openapi
@@ -13,6 +13,8 @@ from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 from Model.users import User
 from Model.games import Game
@@ -28,7 +30,7 @@ import chess
 import chess.engine
 
 app = FastAPI(
-    title="Minha API",
+    title="Pychess",
     description="API com autenticação JWT",
     version="1.0",
     openapi_tags=[{"name": "DB", "description": "Rotas que acessam o banco de dados"}],
@@ -37,12 +39,25 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
+# Configurar os domínios permitidos (origens permitidas)
+origins = [
+    "http://localhost:3000",  # Frontend Next.js em desenvolvimento
+    "http://127.0.0.1:3000",  # Outra variação do localhost
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,  # Permitir essas origens
+    allow_credentials=True,
+    allow_methods=["*"],  # Permitir todos os métodos (GET, POST, PUT, DELETE, etc.)
+    allow_headers=["*"],  # Permitir todos os headers
+)
 
 def custom_openapi():
     if app.openapi_schema:
         return app.openapi_schema
     openapi_schema = get_openapi(
-        title="Minha API",
+        title="Pychess",
         version="1.0",
         description="API com autenticação JWT",
         routes=app.routes,
@@ -702,6 +717,15 @@ def get_db():
     finally:
         db.close()
 
+@app.get("/verify-token/", tags=['DB'])
+def verify_token(authorization: str = Header(...)):
+    try:
+        token = authorization.replace("Bearer ", "")
+        payload = jwt.decode(token, str(SECRET_KEY), algorithms=[ALGORITHM])
+        return {"valid": True, "user_id": payload["id"]}
+    except:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
 @app.post("/new-users/",tags=['DB'])
 def create_user(username: str, password: str, email: str, db: Session = Depends(get_db)):
     if db.query(User).filter(User.username == username).first():
@@ -730,16 +754,19 @@ def get_users(db: Session = Depends(get_db)):
         for user in users
     ]
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
 @app.post("/login/", tags=['DB'])
-def login(username: str, password: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.username == username).first()
-    if not user or not bcrypt.verify(password, user.password):
+def login(payload: LoginRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == payload.username).first()
+    if not user or not bcrypt.verify(payload.password, user.password):
         raise HTTPException(status_code=400, detail="Invalid username or password")
 
-    # Gerar token JWT
     expiration = datetime.utcnow() + timedelta(hours=1)
     token = jwt.encode({"id": user.id, "exp": expiration}, str(SECRET_KEY), algorithm=ALGORITHM)
-    
+
     return {"message": "Login successful", "token": token}
 
 @app.get("/user-session/", tags=['DB'])
