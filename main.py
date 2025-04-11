@@ -14,7 +14,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 
 from Model.users import User
 from Model.games import Game
@@ -726,14 +726,19 @@ def verify_token(authorization: str = Header(...)):
     except:
         raise HTTPException(status_code=401, detail="Invalid token")
 
+class CreateUserRequest(BaseModel):
+    username: str
+    password: str
+    email: EmailStr
+
 @app.post("/new-users/",tags=['DB'])
-def create_user(username: str, password: str, email: str, db: Session = Depends(get_db)):
-    if db.query(User).filter(User.username == username).first():
+def create_user(user: CreateUserRequest, db: Session = Depends(get_db)):
+    if db.query(User).filter(User.username == user.username).first():
         raise HTTPException(status_code=400, detail="Username already registered")
     
-    hashed_password = bcrypt.hash(password)
+    hashed_password = bcrypt.hash(user.password)
 
-    new_user = User(username=username, password=hashed_password, email=email)
+    new_user = User(username=user.username, password=hashed_password, email=user.email)
     db.add(new_user)
     db.commit()
 
