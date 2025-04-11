@@ -1,8 +1,11 @@
-# Pychess-API
+# ♟️ Pychess-API
 
-Pychess-API é uma API desenvolvida com FastAPI para fornecer funcionalidades relacionadas ao xadrez.
+Pychess-API é uma API desenvolvida com FastAPI para fornecer funcionalidades relacionadas ao xadrez, como validação de lances, análise de jogadas e gerenciamento de partidas.  
+Ela já está integrada com o mecanismo de xadrez **Stockfish**, permitindo análises automatizadas de jogadas.
 
-## Configuração e Execução
+---
+
+## 🚀 Configuração e Execução
 
 Para rodar o projeto, siga os passos abaixo:
 
@@ -39,7 +42,12 @@ Após iniciar o servidor, acesse a interface interativa do Swagger para visualiz
 ---
 
 📌 **Tecnologias utilizadas:**  
-✅ Python  
-✅ FastAPI  
-✅ Uvicorn  
+✅ Python
+✅ FastAPI
+✅ Uvicorn
+✅ Stockfish
+
+🤝 Contribuindo
+Contribuições são bem-vindas!
+Sinta-se à vontade para abrir issues, propor melhorias ou enviar pull requests.
 
