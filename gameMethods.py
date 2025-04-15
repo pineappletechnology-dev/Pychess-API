@@ -399,3 +399,207 @@ def analyzeMove(move: str, db: Session = Depends(get_db)):
         eval_best_score: eval_best_score,
         classification: classification,
     }
+
+def evaulatePosition(db: Session = Depends(get_db)):
+    """ Avalia a posição do tabuleiro por 5 segundos, aumentando a profundidade da análise a cada segundo. """
+    game = db.query(Game).filter(Game.player_win == 0).first()
+
+    if not game:
+        raise HTTPException(status_code=400, detail="Nenhum jogo ativo encontrado!")
+
+    # Obtém os movimentos já registrados no banco para este jogo
+    game_moves = db.query(Move.move).filter(Move.game_id == game.id).all()
+    game_moves = [m.move for m in game_moves]  # Transformando em lista de strings
+    stockfish.set_position(game_moves)  # Garante que estamos avaliando o estado atual
+
+    best_evaluation = None
+    best_depth = 0
+
+    for depth in range(8, 8 + 5):  # Começa na profundidade 8 e vai até 12
+        stockfish.set_depth(depth)
+        evaluation = stockfish.get_evaluation()
+        
+        # Atualiza a melhor avaliação encontrada
+        if best_evaluation is None or abs(evaluation["value"]) > abs(best_evaluation["value"]):
+            best_evaluation = evaluation
+            best_depth = depth
+
+        time.sleep(1) 
+
+    # Verifica se houve xeque-mate
+    if best_evaluation["type"] == "mate":
+        if best_evaluation["value"] > 0:
+            return {"winner": "Brancas", "win_probability": 100, "lose_probability": 0}
+        else:
+            return {"winner": "Pretas", "win_probability": 100, "lose_probability": 0}
+
+    # Convertendo a vantagem do Stockfish para probabilidade de vitória
+    centipawns = best_evaluation["value"]
+    win_probability = 1 / (1 + math.exp(-0.004 * centipawns)) * 100  # Fórmula de conversão
+
+    return {
+        centipawns: centipawns,
+        best_depth: best_depth,
+        win_probability: win_probability,
+    }
+
+def rating(user_id: str, db: Session = Depends(get_db)):
+    """Avalia o jogo completo armazenado em game_moves e atualiza o rating do jogador no banco de dados."""
+
+    global stockfish
+
+    game = db.query(Game).filter(Game.player_win == 0).first()
+
+    if not game:
+        raise HTTPException(status_code=400, detail="Nenhum jogo ativo encontrado!")
+
+    # Obtém os movimentos já registrados no banco para este jogo
+    game_moves = db.query(Move.move).filter(Move.game_id == game.id).all()
+    game_moves = [m.move for m in game_moves]  # Transformando em lista de strings
+
+    # Verifica se há jogadas para avaliar
+    if not game_moves:
+        raise HTTPException(status_code=400, detail="Nenhuma jogada registrada para avaliação.")
+
+    # Busca o usuário e seu rating atual
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuário não encontrado!")
+
+    base_rating = user.rating  # Rating atual do jogador
+    rating = base_rating  # Inicializa o rating com o valor do banco
+
+    stockfish.set_position([])  # Reseta o Stockfish para o início da partida
+
+    for i, move in enumerate(game_moves):
+        if not stockfish.is_move_correct(move):
+            raise HTTPException(status_code=400, detail=f"Movimento inválido detectado: {move}")
+
+        stockfish.set_position(game_moves[:i + 1])  # Atualiza posição até a jogada atual
+
+        best_move = stockfish.get_best_move()  # Melhor jogada segundo Stockfish
+        evaluation_before = stockfish.get_evaluation()  # Avaliação antes do movimento
+        stockfish.make_moves_from_current_position([move])  # Aplica o movimento no Stockfish
+        evaluation_after = stockfish.get_evaluation()  # Avaliação depois do movimento
+        
+        eval_diff = evaluation_before["value"] - evaluation_after["value"]
+
+        if best_move == move:
+            rating += 50  # Jogada perfeita
+        elif eval_diff > 200:
+            rating -= 50  # Erro grave (Blunder)
+        elif eval_diff > 100:
+            rating -= 20  # Jogada imprecisa
+        elif eval_diff > 30:
+            rating -= 5   # Pequeno erro
+        else:
+            rating += 5   # Jogada sólida
+
+    # Garante que o rating final não fique negativo
+    final_rating = max(0, rating)
+
+    # Calcula a diferença entre o rating final e o atual do jogador
+    rating_diff = final_rating - base_rating
+
+    # Atualiza o rating no banco de dados conforme a diferença
+    if rating_diff >= 200:
+        user.rating += 100
+    elif rating_diff >= 100:
+        user.rating += 70
+    elif rating_diff >= 20:
+        user.rating += 50
+    elif rating_diff > 0:
+        user.rating += 20
+
+    userRating = user.rating
+
+    db.commit()
+
+    return {
+        final_rating: final_rating,
+        userRating: user.rating,
+        game_moves: game_moves,
+    }
+
+def getGameHistory(db: Session = Depends(get_db)):
+    """ Retorna o histórico de jogadas do jogo atual. """
+    game = db.query(Game).filter(Game.player_win == 0).first()
+
+    if not game:
+        raise HTTPException(status_code=400, detail="Nenhum jogo ativo encontrado!")
+
+    # Obtém os movimentos já registrados no banco para este jogo
+    game_moves = db.query(Move.move).filter(Move.game_id == game.id).all()
+    game_moves = [m.move for m in game_moves]  # Transformando em lista de strings
+
+
+    return game_moves
+
+def evaluateProgress():
+    """Compara as três últimas partidas e verifica a evolução do jogador."""
+    global game_moves, game_history, stockfish
+
+    if not game_moves:
+        raise HTTPException(status_code=400, detail="Nenhuma partida registrada para avaliação.")
+
+    # Adiciona a última partida ao histórico
+    if len(game_history) >= 3:
+        game_history.pop(0)  # Remove a mais antiga para manter apenas 3 partidas
+
+    game_history.append(list(game_moves))  # Salva o jogo atual
+
+    if len(game_history) < 3:
+        return {"message": "Ainda não há partidas suficientes para análise. Jogue pelo menos 3 partidas!"}
+
+    def analyze_game(moves):
+        """Analisa uma partida e retorna estatísticas de qualidade."""
+        stockfish.set_position([])
+        good_moves, blunders, total_moves = 0, 0, len(moves)
+
+        for i, move in enumerate(moves):
+            stockfish.set_position(moves[:i + 1])
+
+            best_move = stockfish.get_best_move()
+            evaluation_before = stockfish.get_evaluation()
+            stockfish.make_moves_from_current_position([move])
+            evaluation_after = stockfish.get_evaluation()
+
+            eval_diff = evaluation_before["value"] - evaluation_after["value"]
+
+            if best_move == move:
+                good_moves += 1  # Jogada perfeita
+            elif eval_diff > 200:
+                blunders += 1  # Erro grave
+            elif eval_diff > 100:
+                blunders += 0.5  # Pequeno erro
+
+        return {
+            "good_moves": good_moves,
+            "blunders": blunders,
+            "total_moves": total_moves
+        }
+
+    # Analisa as três últimas partidas
+    analysis = [analyze_game(game) for game in game_history]
+
+    def calc_percentage_change(old, new):
+        """Calcula a porcentagem de mudança entre duas partidas."""
+        if old == 0:
+            return 100 if new > 0 else 0  # Se não houver referência anterior
+        return round(((new - old) / old) * 100, 2)
+
+    # Compara a última partida com as duas anteriores
+    progress = {
+        "improvement_from_last": {
+            "good_moves": calc_percentage_change(analysis[1]["good_moves"], analysis[2]["good_moves"]),
+            "blunders": calc_percentage_change(analysis[1]["blunders"], analysis[2]["blunders"]),
+            "total_moves": calc_percentage_change(analysis[1]["total_moves"], analysis[2]["total_moves"])
+        },
+        "improvement_from_two_games_ago": {
+            "good_moves": calc_percentage_change(analysis[0]["good_moves"], analysis[2]["good_moves"]),
+            "blunders": calc_percentage_change(analysis[0]["blunders"], analysis[2]["blunders"]),
+            "total_moves": calc_percentage_change(analysis[0]["total_moves"], analysis[2]["total_moves"])
+        }
+    }
+
+    return progress
