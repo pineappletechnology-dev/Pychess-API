@@ -300,7 +300,10 @@ def get_game_board(db: Session = Depends(get_db)):
     if not board_visual:
         raise HTTPException(status_code=500, detail="Falha ao gerar visualização do tabuleiro.")
 
-    return {"board": board_visual.split("\n")}
+    return {
+        "board": board_visual.split("\n"),
+        "fen": fen_string
+    }
 
 @app.post("/play_game/", tags=['GAME'])
 def play_game(move: str, db: Session = Depends(get_db)):
