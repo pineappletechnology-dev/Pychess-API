@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, Security, Header
+from fastapi import FastAPI, Depends, HTTPException, Security, Header, BackgroundTasks
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.openapi.models import APIKey
 from fastapi.openapi.utils import get_openapi
@@ -21,6 +21,7 @@ from jwt import ExpiredSignatureError, DecodeError
 from Model.users import User
 from Model.games import Game
 from Model.moves import Move
+from Model.evaluation import Evaluation
 
 import jwt
 import math
@@ -308,7 +309,7 @@ def get_game_board(db: Session = Depends(get_db)):
     }
 
 @app.post("/play_game/", tags=['GAME'])
-def play_game(move: str, db: Session = Depends(get_db)):
+def play_game(move: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """ O usuário joga, e o Stockfish responde com a melhor jogada, verificando capturas. """
 
     # Verifica se há um jogo ativo
@@ -400,6 +401,8 @@ def play_game(move: str, db: Session = Depends(get_db)):
                 "player_move": move,
                 "stockfish_move": None
             }
+        
+    background_tasks.add_task(calculate_and_save_evaluation, game.id, db)
 
     return {
         "message": "Movimentos realizados!",
@@ -408,51 +411,71 @@ def play_game(move: str, db: Session = Depends(get_db)):
         "stockfish_move": best_move
     }
 
-@app.get("/evaluate_position/", tags=['GAME'])
-def evaluate_position(db: Session = Depends(get_db)):
-    """ Avalia a posição do tabuleiro por 5 segundos, aumentando a profundidade da análise a cada segundo. """
-    game = db.query(Game).filter(Game.player_win == 0).first()
+def calculate_and_save_evaluation(game_id: int, db: Session):
+    moves = db.query(Move.move).filter(Move.game_id == game_id).order_by(Move.id).all()
+    move_list = [m.move for m in moves]
+    stockfish.set_position(move_list)
 
-    if not game:
-        raise HTTPException(status_code=400, detail="Nenhum jogo ativo encontrado!")
-
-    # Obtém os movimentos já registrados no banco para este jogo
-    game_moves = db.query(Move.move).filter(Move.game_id == game.id).all()
-    game_moves = [m.move for m in game_moves]  # Transformando em lista de strings
-    stockfish.set_position(game_moves)  # Garante que estamos avaliando o estado atual
-
-    best_evaluation = None
+    best_eval = None
     best_depth = 0
 
-    for depth in range(8, 8 + 5):  # Começa na profundidade 8 e vai até 12
+    for depth in range(8, 13):
         stockfish.set_depth(depth)
         evaluation = stockfish.get_evaluation()
-        
-        # Atualiza a melhor avaliação encontrada
-        if best_evaluation is None or abs(evaluation["value"]) > abs(best_evaluation["value"]):
-            best_evaluation = evaluation
+
+        if best_eval is None or abs(evaluation["value"]) > abs(best_eval["value"]):
+            best_eval = evaluation
             best_depth = depth
 
-        time.sleep(1) 
-
-    # Verifica se houve xeque-mate
-    if best_evaluation["type"] == "mate":
-        if best_evaluation["value"] > 0:
-            return {"winner": "Brancas", "win_probability": 100, "lose_probability": 0}
+    if best_eval["type"] == "mate":
+        if best_eval["value"] > 0:
+            win_white = 100
         else:
-            return {"winner": "Pretas", "win_probability": 100, "lose_probability": 0}
+            win_white = 0
+    else:
+        cp = best_eval["value"]
+        win_white = round((1 / (1 + math.exp(-0.004 * cp))) * 100, 2)
 
-    # Convertendo a vantagem do Stockfish para probabilidade de vitória
-    centipawns = best_evaluation["value"]
-    win_probability = 1 / (1 + math.exp(-0.004 * centipawns)) * 100  # Fórmula de conversão
+    win_black = round(100 - win_white, 2)
+
+    existing = db.query(Evaluation).filter(Evaluation.game_id == game_id).first()
+    if existing:
+        existing.evaluation = best_eval["value"]
+        existing.depth = best_depth
+        existing.win_probability_white = win_white
+        existing.win_probability_black = win_black
+        existing.last_updated = datetime.utcnow()
+    else:
+        new_eval = Evaluation(
+            game_id=game_id,
+            evaluation=best_eval["value"],
+            depth=best_depth,
+            win_probability_white=win_white,
+            win_probability_black=win_black,
+        )
+        db.add(new_eval)
+
+    db.commit()
+
+
+@app.get("/evaluate_position/", tags=['GAME'])
+def evaluate_position(db: Session = Depends(get_db)):
+    game = db.query(Game).filter(Game.player_win == 0).first()
+    if not game:
+        raise HTTPException(status_code=404, detail="Nenhum jogo ativo encontrado.")
+
+    evaluation = db.query(Evaluation).filter(Evaluation.game_id == game.id).first()
+    if not evaluation:
+        raise HTTPException(status_code=404, detail="Nenhuma avaliação disponível ainda.")
 
     return {
-        "evaluation": centipawns,
-        "best_depth": best_depth,
-        "win_probability_white": round(win_probability, 2),
-        "win_probability_black": round(100 - win_probability, 2),
-        "board": stockfish.get_board_visual()
+        "evaluation": evaluation.evaluation,
+        "best_depth": evaluation.depth,
+        "win_probability_white": evaluation.win_probability_white,
+        "win_probability_black": evaluation.win_probability_black,
+        "last_updated": evaluation.last_updated,
     }
+
 
 @app.get("/game_moves/", tags=["GAME"])
 def get_game_moves(db: Session = Depends(get_db)):
