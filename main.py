@@ -49,10 +49,10 @@ origins = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,  # Permitir essas origens
+    allow_origins=["http://localhost:3000"],  # ou ["*"] se for só pra testes
     allow_credentials=True,
-    allow_methods=["*"],  # Permitir todos os métodos (GET, POST, PUT, DELETE, etc.)
-    allow_headers=["*"],  # Permitir todos os headers
+    allow_methods=["*"],
+    allow_headers=["*"],  # <- isso é o importante pro Authorization!
 )
 
 def custom_openapi():
@@ -772,9 +772,8 @@ def get_db():
         db.close()
 
 @app.get("/verify-token/", tags=['DB'])
-def verify_token(authorization: str = Header(...)):
+def verify_token(token: str):
     try:
-        token = authorization.replace("Bearer ", "")
         payload = jwt.decode(token, str(SECRET_KEY), algorithms=[ALGORITHM])
         return {"valid": True, "user_id": payload["id"]}
     except ExpiredSignatureError:
