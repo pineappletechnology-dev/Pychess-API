@@ -15,6 +15,7 @@ from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
+from fastapi.responses import JSONResponse
 
 from Model.users import User
 from Model.games import Game
@@ -612,6 +613,34 @@ def game_history(db: Session = Depends(get_db)):
     game_moves = [m.move for m in game_moves]  # Transformando em lista de strings
 
     return {"moves": game_moves}
+
+@app.get("/last_game/", tags=["GAME"])
+def get_last_game(db: Session = Depends(get_db)):
+    """
+    Retorna a última partida concluída.
+    """
+    # Busca a última partida onde já houve vencedor (player_win diferente de 0)
+    last_game = (
+        db.query(Game)
+        .filter(Game.player_win != 0)
+        .order_by(Game.id.desc())
+        .first()
+    )
+
+    if not last_game:
+        return JSONResponse(content={"detail": "Nenhuma partida encontrada."}, status_code=404)
+
+    user = db.query(User).filter(User.id == last_game.user_id).first()
+    username = user.username if user else "Desconhecido"
+
+    # Determina o resultado
+    result = "Vitória" if last_game.player_win == 1 else "Derrota"
+
+
+    return {
+        "username": username,
+        "result": result
+    }
 
 @app.post("/evaluate_progress/", tags=['GAME'])
 def evaluate_progress(db: Session = Depends(get_db)):
