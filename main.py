@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 from fastapi.responses import JSONResponse
+from jwt import ExpiredSignatureError, DecodeError
 
 from Model.users import User
 from Model.games import Game
@@ -453,6 +454,18 @@ def evaluate_position(db: Session = Depends(get_db)):
         "board": stockfish.get_board_visual()
     }
 
+@app.get("/game_moves/", tags=["GAME"])
+def get_game_moves(db: Session = Depends(get_db)):
+    game = db.query(Game).filter(Game.player_win == 0).first()
+    if not game:
+        raise HTTPException(status_code=404, detail="Nenhum jogo ativo encontrado.")
+    
+    moves = db.query(Move).filter(Move.game_id == game.id).order_by(Move.id).all()
+    move_list = [m.move for m in moves]
+    
+    return {"moves": move_list}
+
+
 @app.post("/rating/", tags=['GAME'])
 def rating(user_id: int, db: Session = Depends(get_db)):
     """Avalia o jogo completo armazenado em game_moves e atualiza o rating do jogador no banco de dados."""
@@ -764,8 +777,12 @@ def verify_token(authorization: str = Header(...)):
         token = authorization.replace("Bearer ", "")
         payload = jwt.decode(token, str(SECRET_KEY), algorithms=[ALGORITHM])
         return {"valid": True, "user_id": payload["id"]}
-    except:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    except ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expirado.")
+    except DecodeError:
+        raise HTTPException(status_code=401, detail="Token inválido.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
 
 class CreateUserRequest(BaseModel):
     username: str
