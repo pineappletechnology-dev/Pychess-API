@@ -31,6 +31,10 @@ import os
 import smtplib
 import chess
 import chess.engine
+import socketio
+import asyncio
+
+sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
 
 app = FastAPI(
     title="Pychess",
@@ -55,6 +59,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],  # <- isso é o importante pro Authorization!
 )
+
+app_socket = socketio.ASGIApp(sio, other_asgi_app=app)
 
 def custom_openapi():
     if app.openapi_schema:
@@ -309,7 +315,7 @@ def get_game_board(db: Session = Depends(get_db)):
     }
 
 @app.post("/play_game/", tags=['GAME'])
-def play_game(move: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+async def play_game(move: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """ O usuário joga, e o Stockfish responde com a melhor jogada, verificando capturas. """
 
     # Verifica se há um jogo ativo
@@ -403,6 +409,8 @@ def play_game(move: str, background_tasks: BackgroundTasks, db: Session = Depend
             }
         
     background_tasks.add_task(calculate_and_save_evaluation, game.id, db)
+
+    await sio.emit("board_updated")
 
     return {
         "message": "Movimentos realizados!",
