@@ -18,3 +18,4 @@ class Game(BaseModel):
     difficulty: str
     time: int
     moveNumber: int
+

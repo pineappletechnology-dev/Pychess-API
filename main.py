@@ -98,39 +98,6 @@ stockfish.set_depth(15)  # Profundidade de busca
 game_moves = []
 saved_games = {}
 
-def create_reset_token(email: str):
-    """ Gera um token JWT para redefinição de senha """
-    expire = datetime.utcnow() + timedelta(minutes=30)
-    data = {"sub": email, "exp": expire}
-    return jwt.encode(data, SECRET_KEY, algorithm=ALGORITHM)
-
-def send_reset_email(email: str, token: str):
-    """ Envia o e-mail com o link para redefinir senha """
-    reset_link = f"http://localhost:8000/reset-password?token={token}"
-    
-    msg = MIMEMultipart()
-    msg["From"] = os.getenv("SMTP_EMAIL")
-    msg["To"] = email
-    msg["Subject"] = "Redefinição de Senha"
-    
-    body = f"""
-    <p>Olá,</p>
-    <p>Você solicitou a redefinição de senha. Clique no link abaixo para redefinir sua senha:</p>
-    <p><a href="{reset_link}">Redefinir Senha</a></p>
-    <p>Este link expira em {30} minutos.</p>
-    """
-    
-    msg.attach(MIMEText(body, "html"))
-
-    try:
-        server = smtplib.SMTP(os.getenv("SMTP_SERVER"), os.getenv("SMTP_PORT"))
-        server.starttls()
-        server.login(os.getenv("SMTP_EMAIL"), os.getenv("SMTP_PASSWORD"))
-        server.sendmail(os.getenv("SMTP_EMAIL"), email, msg.as_string())
-        server.quit()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao enviar e-mail: {str(e)}")
-
 def get_current_user(credentials: HTTPAuthorizationCredentials = Security(security), db: Session = Depends(get_db)):
     token = credentials.credentials
 
@@ -271,28 +238,10 @@ def evaluate_progress():
 # ROTAS A SEREM USADAS AO PENSAR EM INTEGRAR COM O ROBO
 @app.get("/get_position/{square}", tags=['ROBOT'])
 def get_position(square: str):
-    """ Converte uma posição do tabuleiro de xadrez (ex: 'h1') para coordenadas numéricas (x, y). """
-    
-    if len(square) != 2 or square[0] not in "abcdefgh" or square[1] not in "12345678":
-        raise HTTPException(status_code=400, detail="Posição inválida! Use notação padrão, ex: 'h1'.")
 
-    # Mapeamento das colunas (a-h) para valores X
-    column_map = {
-        "a": 1000, "b": 2000, "c": 3000, "d": 4000,
-        "e": 5000, "f": 6000, "g": 7000, "h": 8000
-    }
-    
-    # Mapeamento das linhas (1-8) para valores Y
-    row_map = {
-        "1": 1000, "2": 2000, "3": 3000, "4": 4000,
-        "5": 5000, "6": 6000, "7": 7000, "8": 8000
-    }
+    position = gameMethods.getPosition(square)
 
-    # Obtendo valores X e Y
-    x = column_map[square[0]]
-    y = row_map[square[1]]
-
-    return {"square": square, "x": x, "y": y}
+    return {"square": square, "x": position[0], "y": position[1]}
 
 # Rotas de conexão DB
 def get_db():
@@ -304,16 +253,7 @@ def get_db():
 
 @app.post("/register/",tags=['DB'])
 def create_user(payload: baseModels.UserRegister, db: Session = Depends(get_db)):
-    print("payload", payload)
-    
-    if db.query(User).filter(User.username == payload.username).first():
-        raise HTTPException(status_code=400, detail="Username already registered")
-    
-    hashed_password = bcrypt.hash(payload.password)
-
-    new_user = User(username=payload.username, password=hashed_password, email=payload.email)
-    db.add(new_user)
-    db.commit()
+    new_user = dbMethods.createUser(payload.username, payload.password, payload.email, db)
 
     return {
         "message": "User created successfully", 
@@ -322,7 +262,7 @@ def create_user(payload: baseModels.UserRegister, db: Session = Depends(get_db))
 
 @app.get("/get-users/", tags=['DB'])
 def get_users(db: Session = Depends(get_db)):
-    users = db.query(User).order_by(desc(User.rating)).all()
+    users = dbMethods.getUsers(db)
 
     return [
         {
@@ -333,14 +273,8 @@ def get_users(db: Session = Depends(get_db)):
     ]
 
 @app.post("/login/", tags=['DB'])
-def login(username: str, password: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.username == username).first()
-    if not user or not bcrypt.verify(password, user.password):
-        raise HTTPException(status_code=400, detail="Invalid username or password")
-
-    # Gerar token JWT
-    expiration = datetime.utcnow() + timedelta(hours=1)
-    token = jwt.encode({"id": user.id, "exp": expiration}, str(SECRET_KEY), algorithm=ALGORITHM)
+def login(payload: baseModels.UserRegister, db: Session = Depends(get_db)):
+    token = dbMethods.login(payload.username, payload.password, SECRET_KEY, ALGORITHM, db)
     
     return {"message": "Login successful", "token": token}
 
@@ -355,17 +289,19 @@ def get_user_info(user: User = Depends(get_current_user)):
     }
 
 @app.post("/forgot-password/", tags=['DB'])
-def forgot_password(email: str, db: Session = Depends(get_db)):
-    """ Verifica se o e-mail existe e envia um link de recuperação """
-    user = db.query(User).filter(User.email == email).first()
+def forgot_password(payload: baseModels.UserRegister, db: Session = Depends(get_db)):
+    # """ Verifica se o e-mail existe e envia um link de recuperação """
+    # user = db.query(User).filter(User.email == email).first()
     
-    if not user:
-        raise HTTPException(status_code=404, detail="E-mail não encontrado.")
+    # if not user:
+    #     raise HTTPException(status_code=404, detail="E-mail não encontrado.")
     
-    # Gerar token de redefinição de senha
-    reset_token = create_reset_token(email)
+    # # Gerar token de redefinição de senha
+    # reset_token = create_reset_token(email)
     
-    # Enviar e-mail com link
-    send_reset_email(email, reset_token)
+    # # Enviar e-mail com link
+    # send_reset_email(email, reset_token)
+
+    dbMethods.forgotPassword(payload.email, db)
     
     return {"message": "E-mail de redefinição de senha enviado!"}

@@ -83,7 +83,6 @@ def setStockfishDifficultyLevel(level: str):
         "rating": settings["rating"]
     }
 
-
 def verifyExistingGame(db: Session = Depends(get_db)):
     """
     Verifica se o usuário já possui uma partida ativa.
@@ -603,3 +602,27 @@ def evaluateProgress():
     }
 
     return progress
+
+def getPosition(square: str):
+    """ Converte uma posição do tabuleiro de xadrez (ex: 'h1') para coordenadas numéricas (x, y). """
+    
+    if len(square) != 2 or square[0] not in "abcdefgh" or square[1] not in "12345678":
+        raise HTTPException(status_code=400, detail="Posição inválida! Use notação padrão, ex: 'h1'.")
+
+    # Mapeamento das colunas (a-h) para valores X
+    column_map = {
+        "a": 1000, "b": 2000, "c": 3000, "d": 4000,
+        "e": 5000, "f": 6000, "g": 7000, "h": 8000
+    }
+    
+    # Mapeamento das linhas (1-8) para valores Y
+    row_map = {
+        "1": 1000, "2": 2000, "3": 3000, "4": 4000,
+        "5": 5000, "6": 6000, "7": 7000, "8": 8000
+    }
+
+    # Obtendo valores X e Y
+    x = column_map[square[0]]
+    y = row_map[square[1]]
+
+    return [x, y]
