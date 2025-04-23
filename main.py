@@ -276,6 +276,17 @@ def get_game_state_per_moviment(game_id: int, move_number: int, db: Session = De
         "board": stockfish.get_board_visual().split("\n")  # Divide para exibição
     }
 
+@app.get("/game_moves/{game_id}", tags=["GAME"])
+def get_game_moves_by_id(game_id: int, db: Session = Depends(get_db)):
+    game = db.query(Game).filter(Game.id == game_id).first()
+    if not game:
+        raise HTTPException(status_code=404, detail="Jogo não encontrado.")
+
+    moves = db.query(Move).filter(Move.game_id == game.id).order_by(Move.id).all()
+    move_list = [m.move for m in moves]
+
+    return {"moves": move_list}
+
 
 @app.get("/game_board/", tags=['GAME'])
 def get_game_board(db: Session = Depends(get_db)):
