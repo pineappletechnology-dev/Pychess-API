@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, Security
+from fastapi import FastAPI, Depends, HTTPException, Security, Header, BackgroundTasks
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.openapi.models import APIKey
 from fastapi.openapi.utils import get_openapi
@@ -13,10 +13,15 @@ from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, EmailStr
+from fastapi.responses import JSONResponse
+from jwt import ExpiredSignatureError, DecodeError
 
 from Model.users import User
 from Model.games import Game
 from Model.moves import Move
+from Model.evaluation import Evaluation
 
 import jwt
 import math
@@ -26,9 +31,13 @@ import os
 import smtplib
 import chess
 import chess.engine
+import socketio
+import asyncio
+
+sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
 
 app = FastAPI(
-    title="Minha API",
+    title="Pychess",
     description="API com autenticação JWT",
     version="1.0",
     openapi_tags=[{"name": "DB", "description": "Rotas que acessam o banco de dados"}],
@@ -37,12 +46,27 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
+# Configurar os domínios permitidos (origens permitidas)
+origins = [
+    "http://localhost:3000",  # Frontend Next.js em desenvolvimento
+    "http://127.0.0.1:3000",  # Outra variação do localhost
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],  # ou ["*"] se for só pra testes
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],  # <- isso é o importante pro Authorization!
+)
+
+app_socket = socketio.ASGIApp(sio, other_asgi_app=app)
 
 def custom_openapi():
     if app.openapi_schema:
         return app.openapi_schema
     openapi_schema = get_openapi(
-        title="Minha API",
+        title="Pychess",
         version="1.0",
         description="API com autenticação JWT",
         routes=app.routes,
@@ -180,12 +204,11 @@ def set_difficulty(level: str):
     }
 
 @app.post("/start_game/", tags=['GAME'])
-def start_game(user_id: int, db: Session = Depends(get_db)):
-    """ Inicia um novo jogo de xadrez. """
+def start_game(user_id: int,  background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """ Inicia um novo jogo de xadrez e registra a posição inicial. """
     
     # Verifica se há algum jogo em andamento
     existing_game = db.query(Game).filter(Game.player_win == 0).first()
-    
     if existing_game:
         raise HTTPException(status_code=400, detail="Já existe um jogo em andamento!")
 
@@ -196,9 +219,34 @@ def start_game(user_id: int, db: Session = Depends(get_db)):
     db.refresh(new_game)
 
     # Iniciar posição no Stockfish
-    stockfish.set_position([])
+    stockfish.set_position([])  # posição inicial padrão
 
-    return {"message": "Jogo iniciado!", "game_id": new_game.id, "board": stockfish.get_board_visual()}
+    # Criar jogada inicial na tabela moves
+    initial_move = Move(
+        is_player=None,  # Nenhuma jogada ainda
+        move="",  # Movimento vazio (início do jogo)
+        board_string=stockfish.get_fen_position(),  # FEN da posição inicial
+        mv_quality=None,  # Não se aplica ainda
+        game_id=new_game.id
+    )
+    db.add(initial_move)
+    db.commit()
+
+    new_eval = Evaluation(
+            game_id=new_game.id,
+            evaluation=0,
+            depth=0,
+            win_probability_white=50,
+            win_probability_black=50,
+        )
+    db.add(new_eval)
+    db.commit()
+
+    return {
+        "message": "Jogo iniciado!",
+        "game_id": new_game.id,
+        "board": stockfish.get_board_visual()
+    }
 
 @app.post("/load_game/", tags=['GAME'])
 def load_game(game_id: int, db: Session = Depends(get_db)):
@@ -252,6 +300,17 @@ def get_game_state_per_moviment(game_id: int, move_number: int, db: Session = De
         "board": stockfish.get_board_visual().split("\n")  # Divide para exibição
     }
 
+@app.get("/game_moves/{game_id}", tags=["GAME"])
+def get_game_moves_by_id(game_id: int, db: Session = Depends(get_db)):
+    game = db.query(Game).filter(Game.id == game_id).first()
+    if not game:
+        raise HTTPException(status_code=404, detail="Jogo não encontrado.")
+
+    moves = db.query(Move).filter(Move.game_id == game.id).order_by(Move.id).all()
+    move_list = [m.move for m in moves]
+
+    return {"moves": move_list}
+
 
 @app.get("/game_board/", tags=['GAME'])
 def get_game_board(db: Session = Depends(get_db)):
@@ -285,10 +344,13 @@ def get_game_board(db: Session = Depends(get_db)):
     if not board_visual:
         raise HTTPException(status_code=500, detail="Falha ao gerar visualização do tabuleiro.")
 
-    return {"board": board_visual.split("\n")}
+    return {
+        "board": board_visual.split("\n"),
+        "fen": fen_string
+    }
 
 @app.post("/play_game/", tags=['GAME'])
-def play_game(move: str, db: Session = Depends(get_db)):
+async def play_game(move: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """ O usuário joga, e o Stockfish responde com a melhor jogada, verificando capturas. """
 
     # Verifica se há um jogo ativo
@@ -380,6 +442,10 @@ def play_game(move: str, db: Session = Depends(get_db)):
                 "player_move": move,
                 "stockfish_move": None
             }
+        
+    background_tasks.add_task(calculate_and_save_evaluation, game.id, db)
+
+    await sio.emit("board_updated")
 
     return {
         "message": "Movimentos realizados!",
@@ -388,51 +454,83 @@ def play_game(move: str, db: Session = Depends(get_db)):
         "stockfish_move": best_move
     }
 
-@app.get("/evaluate_position/", tags=['GAME'])
-def evaluate_position(db: Session = Depends(get_db)):
-    """ Avalia a posição do tabuleiro por 5 segundos, aumentando a profundidade da análise a cada segundo. """
-    game = db.query(Game).filter(Game.player_win == 0).first()
+def calculate_and_save_evaluation(game_id: int, db: Session):
+    moves = db.query(Move.move).filter(Move.game_id == game_id).order_by(Move.id).all()
+    move_list = [m.move for m in moves]
+    stockfish.set_position(move_list)
 
-    if not game:
-        raise HTTPException(status_code=400, detail="Nenhum jogo ativo encontrado!")
-
-    # Obtém os movimentos já registrados no banco para este jogo
-    game_moves = db.query(Move.move).filter(Move.game_id == game.id).all()
-    game_moves = [m.move for m in game_moves]  # Transformando em lista de strings
-    stockfish.set_position(game_moves)  # Garante que estamos avaliando o estado atual
-
-    best_evaluation = None
+    best_eval = None
     best_depth = 0
 
-    for depth in range(8, 8 + 5):  # Começa na profundidade 8 e vai até 12
+    for depth in range(8, 13):
         stockfish.set_depth(depth)
         evaluation = stockfish.get_evaluation()
-        
-        # Atualiza a melhor avaliação encontrada
-        if best_evaluation is None or abs(evaluation["value"]) > abs(best_evaluation["value"]):
-            best_evaluation = evaluation
+
+        if best_eval is None or abs(evaluation["value"]) > abs(best_eval["value"]):
+            best_eval = evaluation
             best_depth = depth
 
-        time.sleep(1) 
-
-    # Verifica se houve xeque-mate
-    if best_evaluation["type"] == "mate":
-        if best_evaluation["value"] > 0:
-            return {"winner": "Brancas", "win_probability": 100, "lose_probability": 0}
+    if best_eval["type"] == "mate":
+        if best_eval["value"] > 0:
+            win_white = 100
         else:
-            return {"winner": "Pretas", "win_probability": 100, "lose_probability": 0}
+            win_white = 0
+    else:
+        cp = best_eval["value"]
+        win_white = round((1 / (1 + math.exp(-0.004 * cp))) * 100, 2)
 
-    # Convertendo a vantagem do Stockfish para probabilidade de vitória
-    centipawns = best_evaluation["value"]
-    win_probability = 1 / (1 + math.exp(-0.004 * centipawns)) * 100  # Fórmula de conversão
+    win_black = round(100 - win_white, 2)
+
+    existing = db.query(Evaluation).filter(Evaluation.game_id == game_id).first()
+    if existing:
+        existing.evaluation = best_eval["value"]
+        existing.depth = best_depth
+        existing.win_probability_white = win_white
+        existing.win_probability_black = win_black
+        existing.last_updated = datetime.utcnow()
+    else:
+        new_eval = Evaluation(
+            game_id=game_id,
+            evaluation=best_eval["value"],
+            depth=best_depth,
+            win_probability_white=win_white,
+            win_probability_black=win_black,
+        )
+        db.add(new_eval)
+
+    db.commit()
+
+
+@app.get("/evaluate_position/", tags=['GAME'])
+def evaluate_position(db: Session = Depends(get_db)):
+    game = db.query(Game).filter(Game.player_win == 0).first()
+    if not game:
+        raise HTTPException(status_code=404, detail="Nenhum jogo ativo encontrado.")
+
+    evaluation = db.query(Evaluation).filter(Evaluation.game_id == game.id).first()
+    if not evaluation:
+        raise HTTPException(status_code=404, detail="Nenhuma avaliação disponível ainda.")
 
     return {
-        "evaluation": centipawns,
-        "best_depth": best_depth,
-        "win_probability_white": round(win_probability, 2),
-        "win_probability_black": round(100 - win_probability, 2),
-        "board": stockfish.get_board_visual()
+        "evaluation": evaluation.evaluation,
+        "best_depth": evaluation.depth,
+        "win_probability_white": evaluation.win_probability_white,
+        "win_probability_black": evaluation.win_probability_black,
+        "last_updated": evaluation.last_updated,
     }
+
+
+@app.get("/game_moves/", tags=["GAME"])
+def get_game_moves(db: Session = Depends(get_db)):
+    game = db.query(Game).filter(Game.player_win == 0).first()
+    if not game:
+        raise HTTPException(status_code=404, detail="Nenhum jogo ativo encontrado.")
+    
+    moves = db.query(Move).filter(Move.game_id == game.id).order_by(Move.id).all()
+    move_list = [m.move for m in moves]
+    
+    return {"moves": move_list}
+
 
 @app.post("/rating/", tags=['GAME'])
 def rating(user_id: int, db: Session = Depends(get_db)):
@@ -595,10 +693,47 @@ def game_history(db: Session = Depends(get_db)):
 
     return {"moves": game_moves}
 
+@app.get("/last_game/", tags=["GAME"])
+def get_last_game(db: Session = Depends(get_db)):
+    """
+    Retorna a última partida concluída.
+    """
+    # Busca a última partida onde já houve vencedor (player_win diferente de 0)
+    last_game = (
+        db.query(Game)
+        .filter(Game.player_win != 0)
+        .order_by(Game.id.desc())
+        .first()
+    )
+
+    if not last_game:
+        return JSONResponse(content={"detail": "Nenhuma partida encontrada."}, status_code=404)
+
+    user = db.query(User).filter(User.id == last_game.user_id).first()
+    username = user.username if user else "Desconhecido"
+
+    # Determina o resultado
+    result = "Vitória" if last_game.player_win == 1 else "Derrota"
+
+
+    return {
+        "username": username,
+        "result": result
+    }
+
 @app.post("/evaluate_progress/", tags=['GAME'])
-def evaluate_progress():
+def evaluate_progress(db: Session = Depends(get_db)):
     """Compara as três últimas partidas e verifica a evolução do jogador."""
-    global game_moves, game_history, stockfish
+    global game_history
+
+    game = db.query(Game).filter(Game.player_win == 0).first()
+
+    if not game:
+        raise HTTPException(status_code=400, detail="Nenhum jogo ativo encontrado!")
+
+    # Obtém os movimentos já registrados no banco para este jogo
+    game_moves = db.query(Move.move).filter(Move.game_id == game.id).all()
+    game_moves = [m.move for m in game_moves]  # Transformando em lista de strings
 
     if not game_moves:
         raise HTTPException(status_code=400, detail="Nenhuma partida registrada para avaliação.")
@@ -702,14 +837,31 @@ def get_db():
     finally:
         db.close()
 
+@app.get("/verify-token/", tags=['DB'])
+def verify_token(token: str):
+    try:
+        payload = jwt.decode(token, str(SECRET_KEY), algorithms=[ALGORITHM])
+        return {"valid": True, "user_id": payload["id"]}
+    except ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expirado.")
+    except DecodeError:
+        raise HTTPException(status_code=401, detail="Token inválido.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
+
+class CreateUserRequest(BaseModel):
+    username: str
+    password: str
+    email: EmailStr
+
 @app.post("/new-users/",tags=['DB'])
-def create_user(username: str, password: str, email: str, db: Session = Depends(get_db)):
-    if db.query(User).filter(User.username == username).first():
+def create_user(user: CreateUserRequest, db: Session = Depends(get_db)):
+    if db.query(User).filter(User.username == user.username).first():
         raise HTTPException(status_code=400, detail="Username already registered")
     
-    hashed_password = bcrypt.hash(password)
+    hashed_password = bcrypt.hash(user.password)
 
-    new_user = User(username=username, password=hashed_password, email=email)
+    new_user = User(username=user.username, password=hashed_password, email=user.email)
     db.add(new_user)
     db.commit()
 
@@ -730,27 +882,45 @@ def get_users(db: Session = Depends(get_db)):
         for user in users
     ]
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
 @app.post("/login/", tags=['DB'])
-def login(username: str, password: str, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.username == username).first()
-    if not user or not bcrypt.verify(password, user.password):
+def login(payload: LoginRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == payload.username).first()
+    if not user or not bcrypt.verify(payload.password, user.password):
         raise HTTPException(status_code=400, detail="Invalid username or password")
 
-    # Gerar token JWT
     expiration = datetime.utcnow() + timedelta(hours=1)
     token = jwt.encode({"id": user.id, "exp": expiration}, str(SECRET_KEY), algorithm=ALGORITHM)
-    
-    return {"message": "Login successful", "token": token}
+
+    return {"message": "Login successful", "token": token, "user_id": user.id}
 
 @app.get("/user-session/", tags=['DB'])
 def get_user_info(user: User = Depends(get_current_user)):
     return {
         "id": user.id,
         "username": user.username,
+        "email": user.email,
         "wins": user.wins,
         "losses": user.losses,
-        "total_games": user.total_games
+        "total_games": user.total_games,
+        "rating": user.rating,
     }
+
+@app.get("/user-history/", tags=['DB'])
+def get_user_history(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    games = db.query(Game).filter(Game.user_id == user.id).where(Game.player_win != 0).order_by(Game.id.desc()).all()
+
+    return [
+        {
+            "id": game.id,
+            "game": f"{user.username} vs PyChessy", 
+            "result": "Vitória" if game.player_win == 1 else "Derrota",  
+        }
+        for game in games
+    ]
 
 @app.post("/forgot-password/", tags=['DB'])
 def forgot_password(email: str, db: Session = Depends(get_db)):
