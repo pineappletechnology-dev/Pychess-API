@@ -204,12 +204,11 @@ def set_difficulty(level: str):
     }
 
 @app.post("/start_game/", tags=['GAME'])
-def start_game(user_id: int, db: Session = Depends(get_db)):
-    """ Inicia um novo jogo de xadrez. """
+def start_game(user_id: int,  background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """ Inicia um novo jogo de xadrez e registra a posição inicial. """
     
     # Verifica se há algum jogo em andamento
     existing_game = db.query(Game).filter(Game.player_win == 0).first()
-    
     if existing_game:
         raise HTTPException(status_code=400, detail="Já existe um jogo em andamento!")
 
@@ -220,9 +219,34 @@ def start_game(user_id: int, db: Session = Depends(get_db)):
     db.refresh(new_game)
 
     # Iniciar posição no Stockfish
-    stockfish.set_position([])
+    stockfish.set_position([])  # posição inicial padrão
 
-    return {"message": "Jogo iniciado!", "game_id": new_game.id, "board": stockfish.get_board_visual()}
+    # Criar jogada inicial na tabela moves
+    initial_move = Move(
+        is_player=None,  # Nenhuma jogada ainda
+        move="",  # Movimento vazio (início do jogo)
+        board_string=stockfish.get_fen_position(),  # FEN da posição inicial
+        mv_quality=None,  # Não se aplica ainda
+        game_id=new_game.id
+    )
+    db.add(initial_move)
+    db.commit()
+
+    new_eval = Evaluation(
+            game_id=new_game.id,
+            evaluation=0,
+            depth=0,
+            win_probability_white=50,
+            win_probability_black=50,
+        )
+    db.add(new_eval)
+    db.commit()
+
+    return {
+        "message": "Jogo iniciado!",
+        "game_id": new_game.id,
+        "board": stockfish.get_board_visual()
+    }
 
 @app.post("/load_game/", tags=['GAME'])
 def load_game(game_id: int, db: Session = Depends(get_db)):
@@ -871,7 +895,7 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     expiration = datetime.utcnow() + timedelta(hours=1)
     token = jwt.encode({"id": user.id, "exp": expiration}, str(SECRET_KEY), algorithm=ALGORITHM)
 
-    return {"message": "Login successful", "token": token}
+    return {"message": "Login successful", "token": token, "user_id": user.id}
 
 @app.get("/user-session/", tags=['DB'])
 def get_user_info(user: User = Depends(get_current_user)):
