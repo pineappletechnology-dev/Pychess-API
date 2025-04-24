@@ -88,7 +88,7 @@ app.openapi = custom_openapi
 
 load_dotenv()
 
-STOCKFISH_PATH = r"C:\Users\joao.silva\OneDrive - Allparts Componentes Ltda\Documentos\GitHub\Pychess-API\stockfish\stockfish-windows-x86-64-avx2.exe"
+STOCKFISH_PATH = os.getenv("STOCKFISH_PATH")
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = os.getenv("ALGORITHM")
 
