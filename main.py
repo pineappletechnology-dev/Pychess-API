@@ -744,7 +744,8 @@ def get_last_game(db: Session = Depends(get_db)):
     return {
         "username": username,
         "result": result,
-        "duration": duration_str
+        "duration": duration_str,
+        "id": last_game.id
     }
 
 @app.post("/evaluate_progress/", tags=['GAME'])
