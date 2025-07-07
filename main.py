@@ -951,7 +951,7 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     if not user or not bcrypt.verify(payload.password, user.password):
         raise HTTPException(status_code=400, detail="Invalid username or password")
 
-    expiration = datetime.utcnow() + timedelta(hours=1)
+    expiration = datetime.utcnow() + timedelta(hours=48)
     token = jwt.encode({"id": user.id, "exp": expiration}, str(SECRET_KEY), algorithm=ALGORITHM)
 
     return {"message": "Login successful", "token": token, "user_id": user.id}
