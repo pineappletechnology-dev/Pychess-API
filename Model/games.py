@@ -7,6 +7,6 @@ class Game(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id"))
-    player_win = Column(Boolean, default=False)
+    player_win = Column(Integer, default=False)
 
     user = relationship("User")  # Relacionamento opcional

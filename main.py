@@ -699,6 +699,7 @@ def get_last_game(db: Session = Depends(get_db)):
     # Busca a última partida onde já houve vencedor (player_win diferente de 0)
     last_game = (
         db.query(Game)
+        # .filter(Game.player_win != 0)
         .order_by(Game.id.desc())
         .first()
     )
@@ -710,7 +711,7 @@ def get_last_game(db: Session = Depends(get_db)):
     username = user.username if user else "Desconhecido"
 
     # Determina o resultado
-    result = "Vitória" if last_game.player_win == 1 else "Derrota"
+    result = "Derrota" if last_game.player_win == 2 else "Vitória"
 
     # Calcular duração da partida
     first_move = (
@@ -1006,7 +1007,7 @@ def get_user_history(db: Session = Depends(get_db), user: User = Depends(get_cur
         resultado.append({
             "id": game.id,
             "username": f"{user.username}", 
-            "result": "win" if game.player_win == 2 else "loss",
+            "result": "Derrota" if game.player_win == 2 else "Vitória",
             "duration": duration_str
         })
 
