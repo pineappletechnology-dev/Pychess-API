@@ -1013,6 +1013,41 @@ def get_user_history(db: Session = Depends(get_db), user: User = Depends(get_cur
 
     return resultado
 
+@app.get("/game-info/{game_id}", tags=["GAME"])
+def get_game_info(game_id: int, db: Session = Depends(get_db)):
+    game = db.query(Game).filter(Game.id == game_id).first()
+    if not game:
+        raise HTTPException(status_code=404, detail="Jogo não encontrado")
+
+    first_move = (
+        db.query(Move)
+        .filter(Move.game_id == game_id)
+        .order_by(Move.created_at.asc())
+        .first()
+    )
+    last_move = (
+        db.query(Move)
+        .filter(Move.game_id == game_id)
+        .order_by(Move.created_at.desc())
+        .first()
+    )
+
+    if first_move and last_move:
+        fmt = "%Y-%m-%d %H:%M:%S"  # ou ajuste para o tipo real
+        start = datetime.strptime(first_move.created_at, fmt)
+        end = datetime.strptime(last_move.created_at, fmt)
+        duration = end - start
+        total_seconds = int(duration.total_seconds())
+        minutes = total_seconds // 60
+        duration_str = f"{minutes} minutos"
+    else:
+        duration_str = "Desconhecido"
+
+    result = "Vitória" if game.player_win == 1 else "Derrota"
+
+    return {"result": result, "duration": duration_str}
+
+
 @app.post("/forgot-password/", tags=['DB'])
 def forgot_password(email: str, db: Session = Depends(get_db)):
     """ Verifica se o e-mail existe e envia um link de recuperação """
