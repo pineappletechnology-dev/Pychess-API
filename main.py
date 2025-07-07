@@ -311,7 +311,6 @@ def get_game_moves_by_id(game_id: int, db: Session = Depends(get_db)):
 
     return {"moves": move_list}
 
-
 @app.get("/game_board/", tags=['GAME'])
 def get_game_board(db: Session = Depends(get_db)):
     """ Retorna a visualização do tabuleiro baseado no último estado salvo no banco. """
@@ -385,6 +384,7 @@ async def play_game(move: str, background_tasks: BackgroundTasks, db: Session = 
         board_string=board.fen(),
         mv_quality=classification,
         game_id=game.id,
+        created_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     )
     db.add(new_move)
     db.commit()
@@ -419,6 +419,7 @@ async def play_game(move: str, background_tasks: BackgroundTasks, db: Session = 
                 board_string=board.fen(),
                 game_id=game.id,
                 mv_quality=None,
+                created_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             )
             db.add(sf_move)
             db.commit()
@@ -500,7 +501,6 @@ def calculate_and_save_evaluation(game_id: int, db: Session):
 
     db.commit()
 
-
 @app.get("/evaluate_position/", tags=['GAME'])
 def evaluate_position(db: Session = Depends(get_db)):
     game = db.query(Game).filter(Game.player_win == 0).first()
@@ -519,7 +519,6 @@ def evaluate_position(db: Session = Depends(get_db)):
         "last_updated": evaluation.last_updated,
     }
 
-
 @app.get("/game_moves/", tags=["GAME"])
 def get_game_moves(db: Session = Depends(get_db)):
     game = db.query(Game).filter(Game.player_win == 0).first()
@@ -530,7 +529,6 @@ def get_game_moves(db: Session = Depends(get_db)):
     move_list = [m.move for m in moves]
     
     return {"moves": move_list}
-
 
 @app.post("/rating/", tags=['GAME'])
 def rating(user_id: int, db: Session = Depends(get_db)):
@@ -701,7 +699,6 @@ def get_last_game(db: Session = Depends(get_db)):
     # Busca a última partida onde já houve vencedor (player_win diferente de 0)
     last_game = (
         db.query(Game)
-        .filter(Game.player_win != 0)
         .order_by(Game.id.desc())
         .first()
     )
@@ -715,10 +712,39 @@ def get_last_game(db: Session = Depends(get_db)):
     # Determina o resultado
     result = "Vitória" if last_game.player_win == 1 else "Derrota"
 
+    # Calcular duração da partida
+    first_move = (
+        db.query(Move)
+        .filter(Move.game_id == last_game.id)
+        .order_by(Move.created_at.asc())
+        .first()
+    )
+    last_move = (
+        db.query(Move)
+        .filter(Move.game_id == last_game.id)
+        .order_by(Move.created_at.desc())
+        .first()
+    )
+
+    if first_move and last_move:
+        fmt = '%Y-%m-%d %H:%M:%S'
+        first_dt = datetime.strptime(first_move.created_at, fmt)
+        last_dt = datetime.strptime(last_move.created_at, fmt)
+        duration = last_dt - first_dt
+        total_seconds = int(duration.total_seconds())
+
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
+
+        duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    else:
+        duration_str = "00:00:00"
 
     return {
         "username": username,
-        "result": result
+        "result": result,
+        "duration": duration_str
     }
 
 @app.post("/evaluate_progress/", tags=['GAME'])
@@ -803,31 +829,63 @@ def evaluate_progress(db: Session = Depends(get_db)):
         "progress": progress
     }
 
+
+
 # ROTAS A SEREM USADAS AO PENSAR EM INTEGRAR COM O ROBO
 @app.get("/get_position/{square}", tags=['ROBOT'])
-def get_position(square: str):
-    """ Converte uma posição do tabuleiro de xadrez (ex: 'h1') para coordenadas numéricas (x, y). """
-    
-    if len(square) != 2 or square[0] not in "abcdefgh" or square[1] not in "12345678":
-        raise HTTPException(status_code=400, detail="Posição inválida! Use notação padrão, ex: 'h1'.")
+def get_move_vector(move: str):
+    """
+    Recebe uma jogada como 'h2h3' e retorna o deslocamento em X, Y
+    e o ângulo inteiro que o robô deve girar a partir da posição 0 (referência horizontal).
+    """
 
-    # Mapeamento das colunas (a-h) para valores X
-    column_map = {
-        "a": 1000, "b": 2000, "c": 3000, "d": 4000,
-        "e": 5000, "f": 6000, "g": 7000, "h": 8000
+    if len(move) != 4:
+        raise HTTPException(status_code=400, detail="Jogada inválida! Use formato padrão, ex: 'h2h3'.")
+
+    from_square = move[:2]
+    to_square = move[2:]
+
+    def get_position(square: str):
+        if len(square) != 2 or square[0] not in "abcdefgh" or square[1] not in "12345678":
+            raise HTTPException(status_code=400, detail=f"Posição inválida: {square}")
+
+        column_map = {
+            "a": 1000, "b": 2000, "c": 3000, "d": 4000,
+            "e": 5000, "f": 6000, "g": 7000, "h": 8000
+        }
+
+        row_map = {
+            "1": 1000, "2": 2000, "3": 3000, "4": 4000,
+            "5": 5000, "6": 6000, "7": 7000, "8": 8000
+        }
+
+        x = column_map[square[0]]
+        y = row_map[square[1]]
+        return (x, y)
+
+    # Posições de origem e destino
+    x1, y1 = get_position(from_square)
+    x2, y2 = get_position(to_square)
+
+    # Vetor de deslocamento
+    dx = x2 - x1
+    dy = y2 - y1
+
+    # Ângulo absoluto (em relação ao eixo X positivo) — referência 0°
+    angle_rad = math.atan2(dy, dx)
+    angle_deg = int(round(math.degrees(angle_rad)))
+
+    # Corrige ângulos negativos para o intervalo 0°–359°
+    if angle_deg < 0:
+        angle_deg += 360
+
+    return {
+        "from": from_square,
+        "to": to_square,
+        "dx": dx,
+        "dy": dy,
+        "angle_deg": angle_deg  # usado sempre a partir da posição 0
     }
-    
-    # Mapeamento das linhas (1-8) para valores Y
-    row_map = {
-        "1": 1000, "2": 2000, "3": 3000, "4": 4000,
-        "5": 5000, "6": 6000, "7": 7000, "8": 8000
-    }
-
-    # Obtendo valores X e Y
-    x = column_map[square[0]]
-    y = row_map[square[1]]
-
-    return {"square": square, "x": x, "y": y}
 
 # Rotas de conexão DB
 def get_db():
@@ -911,16 +969,47 @@ def get_user_info(user: User = Depends(get_current_user)):
 
 @app.get("/user-history/", tags=['DB'])
 def get_user_history(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    games = db.query(Game).filter(Game.user_id == user.id).where(Game.player_win != 0).order_by(Game.id.desc()).all()
+    games = db.query(Game).filter(Game.user_id == user.id).order_by(Game.id.desc()).all()
 
-    return [
-        {
+    resultado = []
+    for game in games:
+        first_move = (
+            db.query(Move)
+            .filter(Move.game_id == game.id)
+            .order_by(Move.created_at.asc())
+            .first()
+        )
+        last_move = (
+            db.query(Move)
+            .filter(Move.game_id == game.id)
+            .order_by(Move.created_at.desc())
+            .first()
+        )
+
+        if first_move and last_move:
+            fmt = '%Y-%m-%d %H:%M:%S'  # ajuste conforme necessário
+            first_dt = datetime.strptime(first_move.created_at, fmt)
+            last_dt = datetime.strptime(last_move.created_at, fmt)
+
+            duration = last_dt - first_dt
+            total_seconds = int(duration.total_seconds())
+
+            hours = total_seconds // 3600
+            minutes = (total_seconds % 3600) // 60
+            seconds = total_seconds % 60
+
+            duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        else:
+            duration_str = "00:00:00"
+
+        resultado.append({
             "id": game.id,
-            "game": f"{user.username} vs PyChessy", 
-            "result": "Vitória" if game.player_win == 1 else "Derrota",  
-        }
-        for game in games
-    ]
+            "username": f"{user.username}", 
+            "result": "win" if game.player_win == 2 else "loss",
+            "duration": duration_str
+        })
+
+    return resultado
 
 @app.post("/forgot-password/", tags=['DB'])
 def forgot_password(email: str, db: Session = Depends(get_db)):
