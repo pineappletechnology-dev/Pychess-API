@@ -899,6 +899,16 @@ def get_robo_mode():
 
     return {"robo_mode": modo_robo_ativo}
 
+@app.post("/set-robo-mode/", tags=['ROBOT'])
+def set_robo_mode(data: dict, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    global modo_robo_ativo
+    ativo = data.get("ativo")
+    if ativo is None:
+        raise HTTPException(status_code=400, detail="Campo 'ativo' obrigatório")
+    modo_robo_ativo = bool(ativo)
+    return {"status": "ok", "robo_mode": modo_robo_ativo}
+
+
 def send_email(email: str, token: str):
     msg = MIMEMultipart()
     msg["From"] = os.getenv("SMTP_EMAIL")
