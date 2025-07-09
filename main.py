@@ -17,11 +17,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 from fastapi.responses import JSONResponse
 from jwt import ExpiredSignatureError, DecodeError
+from uuid import uuid4
 
 from Model.users import User
 from Model.games import Game
 from Model.moves import Move
 from Model.evaluation import Evaluation
+from Model.robotToken import RobotToken
 
 import jwt
 import math
@@ -86,7 +88,7 @@ def custom_openapi():
 
 app.openapi = custom_openapi
 
-load_dotenv()
+load_dotenv(override=True)
 
 STOCKFISH_PATH = r"C:\Users\joao.silva\OneDrive - Allparts Componentes Ltda\Documentos\GitHub\Pychess-API\stockfish\stockfish-windows-x86-64-avx2.exe"
 SECRET_KEY = os.getenv("SECRET_KEY")
@@ -101,6 +103,8 @@ stockfish.set_depth(15)  # Profundidade de busca
 
 # Variável para armazenar o histórico do jogo
 board = chess.Board()
+
+modo_robo_ativo = False
 
 def create_reset_token(email: str):
     """ Gera um token JWT para redefinição de senha """
@@ -888,6 +892,74 @@ def get_move_vector(move: str):
         "dy": dy,
         "angle_deg": angle_deg  # usado sempre a partir da posição 0
     }
+
+@app.get("/get-robo-mode/", tags=['ROBOT'])
+def get_robo_mode():
+    global modo_robo_ativo
+
+    return {"robo_mode": modo_robo_ativo}
+
+def send_email(email: str, token: str):
+    msg = MIMEMultipart()
+    msg["From"] = os.getenv("SMTP_EMAIL")
+    msg["To"] = email
+    msg["Subject"] = "Token para ativar modo Robô"
+
+    body = f"""
+    <p>Olá,</p>
+    <p>Você solicitou ativar o modo robô em sua plataforma de xadrez.</p>
+    <p>Seu token de verificação é:</p>
+    <h2>{token}</h2>
+    <p>Copie e cole esse código no campo solicitado. Este token é válido por tempo limitado e só pode ser usado uma vez.</p>
+    <p>Se você não solicitou isso, ignore este e-mail.</p>
+    """
+
+    msg.attach(MIMEText(body, "html"))
+
+    try:
+        server = smtplib.SMTP(os.getenv("SMTP_SERVER"), os.getenv("SMTP_PORT"))
+        server.starttls()
+        server.login(os.getenv("SMTP_EMAIL"), os.getenv("SMTP_PASSWORD"))
+        server.sendmail(os.getenv("SMTP_EMAIL"), email, msg.as_string())
+        server.quit()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao enviar e-mail: {str(e)}")
+
+@app.post("/generate-robo-token/", tags=['ROBOT'])
+def generate_robo_token(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    try:
+        print(f"Usuário autenticado: ID={user.id}, Email={user.email}")  # debug
+
+        token_str = str(uuid4()).split("-")[0]
+        token = RobotToken(user_id=user.id, token=token_str)
+        db.add(token)
+        db.commit()
+
+        send_email(user.email, token_str)
+
+        return {"message": "Token enviado para seu e-mail"}
+
+    except Exception as e:
+        print("❌ ERRO AO GERAR TOKEN:", e)
+        raise HTTPException(status_code=500, detail="Erro interno ao gerar token")
+
+@app.post("/validate-robo-token/", tags=['ROBOT'])
+def validate_robo_token(data: dict, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    token_str = data.get('token')
+    token = db.query(RobotToken).filter_by(user_id=user.id, token=token_str, used=False).first()
+    
+    if not token:
+        raise HTTPException(status_code=400, detail="Token inválido")
+
+    token.used = True
+    db.commit()
+
+    # Ativar modo robô global (ou por usuário, como preferir)
+    global modo_robo_ativo
+    modo_robo_ativo = True
+
+    return {"message": "Modo robô ativado"}
+
 
 # Rotas de conexão DB
 def get_db():
