@@ -938,8 +938,22 @@ def send_email(email: str, token: str):
 @app.post("/generate-robo-token/", tags=['ROBOT'])
 def generate_robo_token(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     try:
-        print(f"Usuário autenticado: ID={user.id}, Email={user.email}")  # debug
+        sete_dias_atras = datetime.utcnow() - timedelta(days=7)
 
+        # Verifica se já existe um token usado nos últimos 7 dias
+        existing_token = db.query(RobotToken).filter(
+            RobotToken.user_id == user.id,
+            RobotToken.used == True,
+            RobotToken.created_at >= sete_dias_atras
+        ).order_by(RobotToken.created_at.desc()).first()
+
+        if existing_token:
+            global modo_robo_ativo
+            modo_robo_ativo = True
+
+            return {"message": "Token já utilizado nos últimos 7 dias, modo robô já foi ativado recentemente."}
+
+        # Caso não exista, gerar novo token
         token_str = str(uuid4()).split("-")[0]
         token = RobotToken(user_id=user.id, token=token_str)
         db.add(token)
