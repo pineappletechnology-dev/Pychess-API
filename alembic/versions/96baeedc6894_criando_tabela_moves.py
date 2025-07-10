@@ -27,7 +27,8 @@ def upgrade():
         sa.Column('move', sa.String(4), nullable=False),
         sa.Column('board_string', sa.String(250), nullable=False),
         sa.Column('mv_quality', sa.String(10), nullable=True),
-        sa.Column('game_id', sa.Integer, sa.ForeignKey('games.id', ondelete="CASCADE"), nullable=False)
+        sa.Column('game_id', sa.Integer, sa.ForeignKey('games.id', ondelete="CASCADE"), nullable=False),
+        sa.Column('created_at', sa.String(255), nullable=False)
     )
 
 

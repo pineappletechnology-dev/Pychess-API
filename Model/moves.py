@@ -11,5 +11,6 @@ class Move(Base):
     board_string = Column(String(250), nullable=False)
     mv_quality = Column(String(10), nullable=True)
     game_id = Column(Integer, ForeignKey("games.id", ondelete="CASCADE"), nullable=False)
+    created_at = Column(String(250), nullable=False)
 
     game = relationship("Game", backref="moves")  # Relacionamento opcional
