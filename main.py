@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, Security, Header, BackgroundTasks
+from fastapi import FastAPI, Depends, HTTPException, Security, Header, BackgroundTasks, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.openapi.models import APIKey
 from fastapi.openapi.utils import get_openapi
@@ -18,6 +18,8 @@ from pydantic import BaseModel, EmailStr
 from fastapi.responses import JSONResponse
 from jwt import ExpiredSignatureError, DecodeError
 from uuid import uuid4
+from starlette.status import HTTP_400_BAD_REQUEST
+from chess import Board
 
 from Model.users import User
 from Model.games import Game
@@ -35,6 +37,7 @@ import chess
 import chess.engine
 import socketio
 import asyncio
+from typing import Dict
 
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
 
@@ -835,7 +838,68 @@ def evaluate_progress(db: Session = Depends(get_db)):
         "progress": progress
     }
 
+class MoveRequest(BaseModel):
+    move: str
 
+games = {}
+active_games: Dict[str, chess.Board] = {}
+
+@app.post("/play_autonomous_game/", tags=['GAME'])
+async def play_autonomous_game(move_req: MoveRequest, game_id: str = Query(...)):
+    move = move_req.move
+
+    global active_games
+
+    if game_id not in active_games:
+        active_games[game_id] = chess.Board()
+
+    board = active_games[game_id]
+
+    if board.is_game_over():
+        board.reset()
+
+    if move not in [m.uci() for m in board.legal_moves]:
+        return {
+            "fen": board.fen(),
+            "status": "invalid",
+            "error": "Movimento do jogador inválido!",
+            "player_move": move,
+            "stockfish_move": None
+        }
+
+    board.push(chess.Move.from_uci(move))
+
+    if board.is_checkmate():
+        return {
+            "fen": board.fen(),
+            "status": "fim",
+            "message": "Xeque-mate! Brancas venceram!",
+            "player_move": move,
+            "stockfish_move": None
+        }
+
+    stockfish.set_fen_position(board.fen())
+    best_move = stockfish.get_best_move()
+
+    if best_move and chess.Move.from_uci(best_move) in board.legal_moves:
+        board.push(chess.Move.from_uci(best_move))
+        stockfish.set_fen_position(board.fen())
+
+        if board.is_checkmate():
+            return {
+                "fen": board.fen(),
+                "status": "fim",
+                "message": "Xeque-mate! Pretas venceram!",
+                "player_move": move,
+                "stockfish_move": best_move
+            }
+
+    return {
+        "fen": board.fen(),
+        "status": "ok",
+        "player_move": move,
+        "stockfish_move": best_move
+    }
 
 # ROTAS A SEREM USADAS AO PENSAR EM INTEGRAR COM O ROBO
 @app.get("/get_position/{square}", tags=['ROBOT'])
