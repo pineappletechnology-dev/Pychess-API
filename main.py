@@ -93,9 +93,12 @@ app.openapi = custom_openapi
 
 load_dotenv(override=True)
 
-STOCKFISH_PATH = r"C:\Users\joao.silva\OneDrive - Allparts Componentes Ltda\Documentos\GitHub\Pychess-API\stockfish\stockfish-windows-x86-64-avx2.exe"
+STOCKFISH_PATH = os.getenv("STOCKFISH_PATH")
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = os.getenv("ALGORITHM")
+
+if not STOCKFISH_PATH:
+    raise ValueError("A variável de ambiente STOCKFISH_PATH não está definida")
 
 security = HTTPBearer()
 
