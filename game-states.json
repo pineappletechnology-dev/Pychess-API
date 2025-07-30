@@ -1,0 +1,6 @@
+{
+    "IN_PROGRESS": "in_progress",
+    "PLAYER_WIN": "player_win",
+    "AI_WIN": "ai_win",
+    "DRAW": "draw"
+}

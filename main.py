@@ -37,6 +37,7 @@ import chess
 import chess.engine
 import socketio
 import asyncio
+import json
 from typing import Dict
 
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
@@ -66,6 +67,9 @@ app.add_middleware(
 )
 
 app_socket = socketio.ASGIApp(sio, other_asgi_app=app)
+
+with open("game-states.json", 'r') as file:
+    game_states = json.load(file)
 
 def custom_openapi():
     if app.openapi_schema:
@@ -218,7 +222,7 @@ def start_game(user_id: int,  background_tasks: BackgroundTasks, db: Session = D
     """ Inicia um novo jogo de xadrez e registra a posição inicial. """
     
     # Verifica se há algum jogo em andamento
-    existing_game = db.query(Game).filter(Game.player_win == 0).first()
+    existing_game = db.query(Game).filter(Game.status == game_states["IN_PROGRESS"]).first()
     if existing_game:
         raise HTTPException(status_code=400, detail="Já existe um jogo em andamento!")
 
@@ -329,7 +333,7 @@ def get_game_board(db: Session = Depends(get_db)):
     last_game = (
         db.query(Game.id, Move.board_string)
         .join(Move, Move.game_id == Game.id)
-        .filter(Game.player_win == 0)
+        .filter(Game.status == game_states["IN_PROGRESS"])
         .order_by(Game.id.desc(), Move.id.desc())
         .first()
     )
@@ -363,7 +367,7 @@ async def play_game(move: str, background_tasks: BackgroundTasks, db: Session = 
     """ O usuário joga, e o Stockfish responde com a melhor jogada, verificando capturas. """
 
     # Verifica se há um jogo ativo
-    game = db.query(Game).filter(Game.player_win == 0).first()
+    game = db.query(Game).filter(Game.status == game_states["IN_PROGRESS"]).first()
     if not game:
         raise HTTPException(status_code=400, detail="Nenhum jogo ativo encontrado!")
 
@@ -373,6 +377,8 @@ async def play_game(move: str, background_tasks: BackgroundTasks, db: Session = 
     # Se houver um estado salvo, carregamos ele; caso contrário, criamos um novo tabuleiro
     board = chess.Board(last_move.board_string) if last_move and last_move.board_string else chess.Board()
 
+    for m in board.legal_moves:
+        print(m.uci())
     # Verifica se a jogada do jogador é válida
     if move not in [m.uci() for m in board.legal_moves]:
         raise HTTPException(status_code=400, detail="Movimento do jogador inválido!")
@@ -401,7 +407,7 @@ async def play_game(move: str, background_tasks: BackgroundTasks, db: Session = 
 
     # Verifica xeque-mate após o movimento do jogador
     if board.is_checkmate():
-        game.player_win = 1  # Brancas venceram
+        game.status = game_states["PLAYER_WIN"]  # Brancas venceram
         db.commit()
         rating(game.user_id)
 
@@ -436,7 +442,7 @@ async def play_game(move: str, background_tasks: BackgroundTasks, db: Session = 
 
             # Verifica xeque-mate após a jogada do Stockfish
             if board.is_checkmate():
-                game.player_win = 2  # Pretas venceram
+                game.status = game_states["AI_WIN"]  # Pretas venceram
                 db.commit()
                 rating(game.user_id)
 
@@ -513,7 +519,7 @@ def calculate_and_save_evaluation(game_id: int, db: Session):
 
 @app.get("/evaluate_position/", tags=['GAME'])
 def evaluate_position(db: Session = Depends(get_db)):
-    game = db.query(Game).filter(Game.player_win == 0).first()
+    game = db.query(Game).filter(Game.status == game_states["IN_PROGRESS"]).first()
     if not game:
         raise HTTPException(status_code=404, detail="Nenhum jogo ativo encontrado.")
 
@@ -531,7 +537,7 @@ def evaluate_position(db: Session = Depends(get_db)):
 
 @app.get("/game_moves/", tags=["GAME"])
 def get_game_moves(db: Session = Depends(get_db)):
-    game = db.query(Game).filter(Game.player_win == 0).first()
+    game = db.query(Game).filter(Game.status == game_states["IN_PROGRESS"]).first()
     if not game:
         raise HTTPException(status_code=404, detail="Nenhum jogo ativo encontrado.")
     
@@ -546,7 +552,7 @@ def rating(user_id: int, db: Session = Depends(get_db)):
 
     global stockfish
 
-    game = db.query(Game).filter(Game.player_win == 0).first()
+    game = db.query(Game).filter(Game.status == game_states["IN_PROGRESS"]).first()
 
     if not game:
         raise HTTPException(status_code=400, detail="Nenhum jogo ativo encontrado!")
@@ -623,7 +629,7 @@ def analyze_move(move: str,  db: Session = Depends(get_db)):
     """ Analisa a jogada, comparando com a melhor possível. """
 
      # Verifica se existe um jogo ativo
-    game = db.query(Game).filter(Game.player_win == 0).first()
+    game = db.query(Game).filter(Game.status == game_states["IN_PROGRESS"]).first()
 
     if not game:
         raise HTTPException(status_code=400, detail="Nenhum jogo ativo encontrado!")
@@ -690,7 +696,7 @@ def analyze_move(move: str,  db: Session = Depends(get_db)):
 @app.get("/game_history/",tags=['GAME'])
 def game_history(db: Session = Depends(get_db)):
     """ Retorna o histórico de jogadas do jogo atual. """
-    game = db.query(Game).filter(Game.player_win == 0).first()
+    game = db.query(Game).filter(Game.status == game_states["IN_PROGRESS"]).first()
 
     if not game:
         raise HTTPException(status_code=400, detail="Nenhum jogo ativo encontrado!")
@@ -721,7 +727,7 @@ def get_last_game(db: Session = Depends(get_db)):
     username = user.username if user else "Desconhecido"
 
     # Determina o resultado
-    result = "Derrota" if last_game.player_win == 2 else "Vitória"
+    result = "Derrota" if last_game.status == game_states["AI_WIN"] else "Vitória"
 
     # Calcular duração da partida
     first_move = (
@@ -764,7 +770,7 @@ def evaluate_progress(db: Session = Depends(get_db)):
     """Compara as três últimas partidas e verifica a evolução do jogador."""
     global game_history
 
-    game = db.query(Game).filter(Game.player_win == 0).first()
+    game = db.query(Game).filter(Game.status == game_states["IN_PROGRESS"]).first()
 
     if not game:
         raise HTTPException(status_code=400, detail="Nenhum jogo ativo encontrado!")
@@ -1170,7 +1176,7 @@ def get_user_history(db: Session = Depends(get_db), user: User = Depends(get_cur
         resultado.append({
             "id": game.id,
             "username": f"{user.username}", 
-            "result": "Derrota" if game.player_win == 2 else "Vitória",
+            "result": "Derrota" if game.status == game_states["AI_WIN"] else "Vitória",
             "duration": duration_str
         })
 
@@ -1206,7 +1212,7 @@ def get_game_info(game_id: int, db: Session = Depends(get_db)):
     else:
         duration_str = "Desconhecido"
 
-    result = "Vitória" if game.player_win == 1 else "Derrota"
+    result = "Vitória" if game.status == game_states["PLAYER_WIN"] else "Derrota"
 
     return {"result": result, "duration": duration_str}
 
