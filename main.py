@@ -20,6 +20,7 @@ from jwt import ExpiredSignatureError, DecodeError
 from uuid import uuid4
 from starlette.status import HTTP_400_BAD_REQUEST
 from chess import Board
+from dateutil import parser
 
 from Model.users import User
 from Model.games import Game
@@ -54,17 +55,18 @@ app = FastAPI(
 
 # Configurar os domínios permitidos (origens permitidas)
 origins = [
-    "http://localhost:3000",  # Frontend Next.js em desenvolvimento
-    "http://127.0.0.1:3000",  # Outra variação do localhost
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # ou ["*"] se for só pra testes
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],  # <- isso é o importante pro Authorization!
+    allow_headers=["*"],
 )
+
 
 app_socket = socketio.ASGIApp(sio, other_asgi_app=app)
 
@@ -708,28 +710,37 @@ def game_history(db: Session = Depends(get_db)):
     return {"moves": game_moves}
 
 @app.get("/last_game/", tags=["GAME"])
-def get_last_game(db: Session = Depends(get_db)):
+async def get_last_game(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user)
+    ):
     """
     Retorna a última partida concluída.
     """
-    # Busca a última partida onde já houve vencedor (player_win diferente de 0)
+
+    # Buscando user id
+
+    # Busca a última partida
     last_game = (
         db.query(Game)
-        # .filter(Game.player_win != 0)
+        .filter(
+            Game.user_id == user.id, 
+            Game.status.in_([game_states["AI_WIN"], game_states["PLAYER_WIN"]])
+        )
         .order_by(Game.id.desc())
         .first()
     )
-
     if not last_game:
         return JSONResponse(content={"detail": "Nenhuma partida encontrada."}, status_code=404)
+    print(user.id)
+    # Pega usuário
+    game_user = db.query(User).filter(User.id == last_game.user_id).first()
+    username = game_user.username if game_user else "Desconhecido"
 
-    user = db.query(User).filter(User.id == last_game.user_id).first()
-    username = user.username if user else "Desconhecido"
+    # Determina resultado
+    result = "Derrota" if last_game.status == game_states.get("AI_WIN") else "Vitória"
 
-    # Determina o resultado
-    result = "Derrota" if last_game.status == game_states["AI_WIN"] else "Vitória"
-
-    # Calcular duração da partida
+    # Busca primeiros e últimos movimentos
     first_move = (
         db.query(Move)
         .filter(Move.game_id == last_game.id)
@@ -743,21 +754,33 @@ def get_last_game(db: Session = Depends(get_db)):
         .first()
     )
 
-    if first_move and last_move:
-        fmt = '%Y-%m-%d %H:%M:%S'
-        first_dt = datetime.strptime(first_move.created_at, fmt)
-        last_dt = datetime.strptime(last_move.created_at, fmt)
-        duration = last_dt - first_dt
-        total_seconds = int(duration.total_seconds())
+    # Calcula duração
+    duration_str = "00:00:00"
+    try:
+        if (
+            first_move is not None and
+            last_move is not None and
+            getattr(first_move, "created_at", None) is not None and
+            getattr(last_move, "created_at", None) is not None
+        ):
+            first_dt = parser.parse(first_move.created_at) if isinstance(first_move.created_at, str) else first_move.created_at
+            last_dt = parser.parse(last_move.created_at) if isinstance(last_move.created_at, str) else last_move.created_at
 
-        hours = total_seconds // 3600
-        minutes = (total_seconds % 3600) // 60
-        seconds = total_seconds % 60
+            duration = last_dt - first_dt
+            total_seconds = int(duration.total_seconds())
+            hours = total_seconds // 3600
+            minutes = (total_seconds % 3600) // 60
+            seconds = total_seconds % 60
+            duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    except Exception as e:
+        print("Erro ao calcular duração:", e)
 
-        duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-    else:
-        duration_str = "00:00:00"
-
+    print({
+        "username": username,
+        "result": result,
+        "duration": duration_str,
+        "id": last_game.id
+    })
     return {
         "username": username,
         "result": result,
@@ -1138,49 +1161,76 @@ def get_user_info(user: User = Depends(get_current_user)):
         "rating": user.rating,
     }
 
-@app.get("/user-history/", tags=['DB'])
-def get_user_history(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    games = db.query(Game).filter(Game.user_id == user.id).order_by(Game.id.desc()).all()
+@app.get("/user-history/", tags=["GAME"])
+def get_user_history(db: Session = Depends(get_db)):
+    """
+    Retorna o histórico da última partida do usuário.
+    """
+    # Busca a última partida
+    last_game: Optional[Game] = (
+        db.query(Game)
+        .order_by(Game.id.desc())
+        .first()
+    )
 
-    resultado = []
-    for game in games:
-        first_move = (
-            db.query(Move)
-            .filter(Move.game_id == game.id)
-            .order_by(Move.created_at.asc())
-            .first()
+    if not last_game:
+        return JSONResponse(
+            content={"detail": "Nenhuma partida encontrada."},
+            status_code=404
         )
-        last_move = (
-            db.query(Move)
-            .filter(Move.game_id == game.id)
-            .order_by(Move.created_at.desc())
-            .first()
-        )
 
-        if first_move and last_move:
-            fmt = '%Y-%m-%d %H:%M:%S'  # ajuste conforme necessário
-            first_dt = datetime.strptime(first_move.created_at, fmt)
-            last_dt = datetime.strptime(last_move.created_at, fmt)
+    # Busca o usuário
+    user = db.query(User).filter(User.id == last_game.user_id).first()
+    username = user.username if user else "Desconhecido"
 
-            duration = last_dt - first_dt
-            total_seconds = int(duration.total_seconds())
+    # Determina o resultado
+    result = "Derrota" if last_game.status == game_states["AI_WIN"] else "Vitória"
 
-            hours = total_seconds // 3600
-            minutes = (total_seconds % 3600) // 60
-            seconds = total_seconds % 60
+    # Busca o primeiro e último movimento
+    first_move: Optional[Move] = (
+        db.query(Move)
+        .filter(Move.game_id == last_game.id)
+        .order_by(Move.created_at.asc())
+        .first()
+    )
+    last_move: Optional[Move] = (
+        db.query(Move)
+        .filter(Move.game_id == last_game.id)
+        .order_by(Move.created_at.desc())
+        .first()
+    )
 
-            duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-        else:
-            duration_str = "00:00:00"
+    duration_str = "00:00:00"
 
-        resultado.append({
-            "id": game.id,
-            "username": f"{user.username}", 
-            "result": "Derrota" if game.status == game_states["AI_WIN"] else "Vitória",
-            "duration": duration_str
-        })
+    if first_move and last_move:
+        first_created = first_move.created_at
+        last_created = last_move.created_at
 
-    return resultado
+        # Só tenta parse se as datas existirem
+        if first_created and last_created:
+            try:
+                # Se for string, parse com dateutil, se for datetime, usa direto
+                first_dt = parser.parse(first_created) if isinstance(first_created, str) else first_created
+                last_dt = parser.parse(last_created) if isinstance(last_created, str) else last_created
+
+                duration = last_dt - first_dt
+                total_seconds = int(duration.total_seconds())
+
+                hours = total_seconds // 3600
+                minutes = (total_seconds % 3600) // 60
+                seconds = total_seconds % 60
+
+                duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+            except Exception:
+                # Em caso de parse inválido, mantém "00:00:00"
+                duration_str = "00:00:00"
+
+    return {
+        "username": username,
+        "result": result,
+        "duration": duration_str,
+        "id": last_game.id
+    }
 
 @app.get("/game-info/{game_id}", tags=["GAME"])
 def get_game_info(game_id: int, db: Session = Depends(get_db)):
