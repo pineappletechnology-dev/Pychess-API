@@ -61,7 +61,7 @@ origins = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -365,11 +365,15 @@ def get_game_board(db: Session = Depends(get_db)):
     }
 
 @app.post("/play_game/", tags=['GAME'])
-async def play_game(move: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+async def play_game(
+    move: str,
+    background_tasks: BackgroundTasks, db: Session = Depends(get_db),
+    user_id: int = Query(..., description="ID do usuário logado"),
+    ):
     """ O usuário joga, e o Stockfish responde com a melhor jogada, verificando capturas. """
 
     # Verifica se há um jogo ativo
-    game = db.query(Game).filter(Game.status == game_states["IN_PROGRESS"]).first()
+    game = db.query(Game).filter(Game.user_id == user_id, Game.status == game_states["IN_PROGRESS"]).first()
     if not game:
         raise HTTPException(status_code=400, detail="Nenhum jogo ativo encontrado!")
 
@@ -711,8 +715,8 @@ def game_history(db: Session = Depends(get_db)):
 
 @app.get("/last_game/", tags=["GAME"])
 async def get_last_game(
-    db: Session = Depends(get_db),
-    user: User = Depends(get_current_user)
+    user_id: int = Query(..., description="ID do usuário logado"),
+    db: Session = Depends(get_db)
     ):
     """
     Retorna a última partida concluída.
@@ -724,7 +728,7 @@ async def get_last_game(
     last_game = (
         db.query(Game)
         .filter(
-            Game.user_id == user.id, 
+            Game.user_id == user_id,
             Game.status.in_([game_states["AI_WIN"], game_states["PLAYER_WIN"]])
         )
         .order_by(Game.id.desc())
@@ -732,9 +736,8 @@ async def get_last_game(
     )
     if not last_game:
         return JSONResponse(content={"detail": "Nenhuma partida encontrada."}, status_code=404)
-    print(user.id)
     # Pega usuário
-    game_user = db.query(User).filter(User.id == last_game.user_id).first()
+    game_user = db.query(User).filter(User.id == user_id).first()
     username = game_user.username if game_user else "Desconhecido"
 
     # Determina resultado
