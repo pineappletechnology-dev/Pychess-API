@@ -219,6 +219,33 @@ def set_difficulty(level: str):
         "rating": settings["rating"]
     }
 
+# @app.post("/finish_game/")
+# def finish_game(
+#     user_id: int = Query(..., description="ID do usuário logado"),
+#     winner: str = Query(..., description="'player' ou 'ai'"),
+#     db: Session = Depends(get_db)
+# ):
+#     """
+#     Atualiza o status da última partida em andamento do usuário.
+#     """
+#     game = db.query(Game)\
+#              .filter(Game.user_id == user_id, Game.status == game_states["IN_PROGRESS"])\
+#              .order_by(Game.id.desc())\
+#              .first()
+
+#     if not game:
+#         raise HTTPException(status_code=404, detail="Nenhuma partida em andamento encontrada.")
+
+#     if winner == "player":
+#         game.status = game_states["PLAYER_WIN"]
+#     elif winner == "ai":
+#         game.status = game_states["AI_WIN"]
+#     else:
+#         raise HTTPException(status_code=400, detail="Valor de 'winner' inválido. Use 'player' ou 'ai'.")
+
+#     db.commit()
+#     return {"message": f"Partida finalizada. Vencedor: {winner}", "game_id": game.id, "status": game.status}
+
 @app.post("/start_game/", tags=['GAME'])
 def start_game(user_id: int,  background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """ Inicia um novo jogo de xadrez e registra a posição inicial. """
@@ -363,6 +390,85 @@ def get_game_board(db: Session = Depends(get_db)):
         "board": board_visual.split("\n"),
         "fen": fen_string
     }
+
+@app.post("/register_move/", tags=['GAME'])
+async def register_move(
+    move_data: str,  # receberá { move: "e2e4", isPlayer: 1, fen: "..." }
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    user_id: int = Query(..., description="ID do usuário logado"),
+):
+    """Registra uma jogada manualmente (sem o Stockfish jogar automaticamente)."""
+
+    # 1️⃣ Busca o jogo ativo
+    game = db.query(Game).filter(Game.user_id == user_id, Game.status == game_states["IN_PROGRESS"]).first()
+    if not game:
+        raise HTTPException(status_code=400, detail="Nenhum jogo ativo encontrado!")
+
+    # 2️⃣ Busca o último estado salvo do tabuleiro
+    last_move = (
+        db.query(Move)
+        .filter(Move.game_id == game.id)
+        .order_by(Move.id.desc())
+        .first()
+    )
+
+    # 3️⃣ Cria o tabuleiro a partir do último FEN, ou inicializa se não houver jogadas ainda
+    board = chess.Board(last_move.board_string) if last_move and last_move.board_string else chess.Board()
+
+    # 4️⃣ Verifica se o movimento recebido é válido
+    if move_data.move not in [m.uci() for m in board.legal_moves]:
+        raise HTTPException(status_code=400, detail=f"Movimento inválido: {move_data.move}")
+
+    # 5️⃣ Aplica o movimento no tabuleiro
+    board.push(chess.Move.from_uci(move_data.move))
+
+    # 6️⃣ Atualiza o FEN no objeto recebido
+    new_fen = board.fen()
+
+    # 7️⃣ Faz análise da jogada (usa a função existente)
+    analysis = analyze_move(move_data.move, db)
+    classification = analysis["classification"]
+
+    # 8️⃣ Cria o registro da jogada
+    new_move = Move(
+        is_player=bool(move_data.isPlayer),
+        move=move_data.move,
+        board_string=new_fen,
+        mv_quality=classification,
+        game_id=game.id,
+        created_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    )
+    db.add(new_move)
+    db.commit()
+
+    # 9️⃣ Verifica xeque-mate
+    if board.is_checkmate():
+        if move_data.isPlayer:
+            game.status = game_states["PLAYER_WIN"]
+        else:
+            game.status = game_states["AI_WIN"]
+        db.commit()
+        rating(game.user_id)
+        return {
+            "message": "Xeque-mate! Jogo encerrado.",
+            "board_fen": new_fen,
+            "move": move_data.move,
+            "isPlayer": move_data.isPlayer,
+        }
+
+    # 🔟 Analisa e salva avaliação em background
+    background_tasks.add_task(calculate_and_save_evaluation, game.id, db)
+
+    await sio.emit("board_updated")
+
+    return {
+        "message": "Jogada registrada com sucesso.",
+        "board_fen": new_fen,
+        "move": move_data.move,
+        "isPlayer": move_data.isPlayer,
+    }
+
 
 @app.post("/play_game/", tags=['GAME'])
 async def play_game(
