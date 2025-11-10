@@ -1270,16 +1270,43 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     return {"message": "Login successful", "token": token, "user_id": user.id}
 
 @app.get("/user-session/", tags=['DB'])
-def get_user_info(user: User = Depends(get_current_user)):
+def get_user_info(
+    user_id: int | None = Query(None, description="ID do usuário a buscar (opcional)"),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Retorna informações do usuário e estatísticas de partidas calculadas dinamicamente.
+    """
+
+    # ✅ Se um user_id for passado, buscar o usuário correspondente
+    if user_id is not None:
+        db_user = db.query(User).filter(User.id == user_id).first()
+        if not db_user:
+            raise HTTPException(status_code=404, detail="Usuário não encontrado")
+        user = db_user
+
+    # ✅ Busca todas as partidas do usuário
+    games = db.query(Game).filter(Game.user_id == user.id).all()
+
+    # ✅ Calcula estatísticas
+    wins = sum(1 for g in games if g.status == game_states["PLAYER_WIN"])
+    losses = sum(1 for g in games if g.status == game_states["AI_WIN"])
+    draws = sum(1 for g in games if g.status == game_states["DRAW"])
+    total_games = len(games)
+
+    # ✅ Retorna os dados combinados
     return {
         "id": user.id,
         "username": user.username,
         "email": user.email,
-        "wins": user.wins,
-        "losses": user.losses,
-        "total_games": user.total_games,
+        "wins": wins,
+        "losses": losses,
+        "draws": draws,
+        "total_games": total_games,
         "rating": user.rating,
     }
+
 
 @app.get("/user-history/", tags=["GAME"])
 def get_user_history(
