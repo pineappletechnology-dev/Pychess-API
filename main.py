@@ -391,14 +391,25 @@ def get_game_board(db: Session = Depends(get_db)):
         "fen": fen_string
     }
 
-@app.post("/register_move/", tags=['GAME'])
+class MoveData(BaseModel):
+    move: str
+    isPlayer: int
+    fen: str
+
+@app.post("/register_move/", tags=["GAME"])
 async def register_move(
-    move_data: str,  # receberá { move: "e2e4", isPlayer: 1, fen: "..." }
+    move_data: MoveData,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     user_id: int = Query(..., description="ID do usuário logado"),
 ):
-    """Registra uma jogada manualmente (sem o Stockfish jogar automaticamente)."""
+    """
+    Registra uma jogada manualmente (sem o Stockfish jogar automaticamente).
+
+    - **move**: movimento no formato UCI (ex: `"e2e4"`)
+    - **isPlayer**: 1 se for o jogador, 0 se for a IA
+    - **fen**: estado atual do tabuleiro após o movimento
+    """
 
     # 1️⃣ Busca o jogo ativo
     game = db.query(Game).filter(Game.user_id == user_id, Game.status == game_states["IN_PROGRESS"]).first()
@@ -423,10 +434,10 @@ async def register_move(
     # 5️⃣ Aplica o movimento no tabuleiro
     board.push(chess.Move.from_uci(move_data.move))
 
-    # 6️⃣ Atualiza o FEN no objeto recebido
+    # 6️⃣ Atualiza o FEN
     new_fen = board.fen()
 
-    # 7️⃣ Faz análise da jogada (usa a função existente)
+    # 7️⃣ Faz análise da jogada
     analysis = analyze_move(move_data.move, db)
     classification = analysis["classification"]
 
@@ -457,7 +468,7 @@ async def register_move(
             "isPlayer": move_data.isPlayer,
         }
 
-    # 🔟 Analisa e salva avaliação em background
+    # 🔟 Salva avaliação em background
     background_tasks.add_task(calculate_and_save_evaluation, game.id, db)
 
     await sio.emit("board_updated")
@@ -1271,75 +1282,84 @@ def get_user_info(user: User = Depends(get_current_user)):
     }
 
 @app.get("/user-history/", tags=["GAME"])
-def get_user_history(db: Session = Depends(get_db)):
+def get_user_history(
+    user_id: int = Query(..., description="ID do usuário logado"),
+    db: Session = Depends(get_db)
+):
     """
-    Retorna o histórico da última partida do usuário.
+    Retorna o histórico de partidas do usuário, incluindo resultado e duração.
     """
-    # Busca a última partida
-    last_game: Optional[Game] = (
+
+    # Busca todas as partidas do usuário
+    games = (
         db.query(Game)
+        .filter(Game.user_id == user_id)
         .order_by(Game.id.desc())
-        .first()
+        .all()
     )
 
-    if not last_game:
+    if not games:
         return JSONResponse(
             content={"detail": "Nenhuma partida encontrada."},
             status_code=404
         )
 
-    # Busca o usuário
-    user = db.query(User).filter(User.id == last_game.user_id).first()
+    result_list = []
+
+    # Busca o nome do usuário uma única vez (evita várias queries)
+    user = db.query(User).filter(User.id == user_id).first()
     username = user.username if user else "Desconhecido"
 
-    # Determina o resultado
-    result = "Derrota" if last_game.status == game_states["AI_WIN"] else "Vitória"
+    for game in games:
+        # Determina o resultado
+        if game.status == game_states["AI_WIN"]:
+            result = "Derrota"
+        elif game.status == game_states["PLAYER_WIN"]:
+            result = "Vitória"
+        else:
+            result = "Em andamento"
 
-    # Busca o primeiro e último movimento
-    first_move: Optional[Move] = (
-        db.query(Move)
-        .filter(Move.game_id == last_game.id)
-        .order_by(Move.created_at.asc())
-        .first()
-    )
-    last_move: Optional[Move] = (
-        db.query(Move)
-        .filter(Move.game_id == last_game.id)
-        .order_by(Move.created_at.desc())
-        .first()
-    )
+        # Busca o primeiro e o último movimento para calcular a duração
+        first_move: Optional[Move] = (
+            db.query(Move)
+            .filter(Move.game_id == game.id)
+            .order_by(Move.created_at.asc())
+            .first()
+        )
+        last_move: Optional[Move] = (
+            db.query(Move)
+            .filter(Move.game_id == game.id)
+            .order_by(Move.created_at.desc())
+            .first()
+        )
 
-    duration_str = "00:00:00"
+        duration_str = "00:00:00"
 
-    if first_move and last_move:
-        first_created = first_move.created_at
-        last_created = last_move.created_at
+        if first_move and last_move:
+            first_created = first_move.created_at
+            last_created = last_move.created_at
 
-        # Só tenta parse se as datas existirem
-        if first_created and last_created:
             try:
-                # Se for string, parse com dateutil, se for datetime, usa direto
                 first_dt = parser.parse(first_created) if isinstance(first_created, str) else first_created
                 last_dt = parser.parse(last_created) if isinstance(last_created, str) else last_created
-
                 duration = last_dt - first_dt
                 total_seconds = int(duration.total_seconds())
-
                 hours = total_seconds // 3600
                 minutes = (total_seconds % 3600) // 60
                 seconds = total_seconds % 60
-
                 duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
             except Exception:
-                # Em caso de parse inválido, mantém "00:00:00"
                 duration_str = "00:00:00"
 
-    return {
-        "username": username,
-        "result": result,
-        "duration": duration_str,
-        "id": last_game.id
-    }
+        # Adiciona a partida na lista
+        result_list.append({
+            "id": game.id,
+            "username": username,
+            "result": result,
+            "duration": duration_str
+        })
+
+    return result_list
 
 @app.get("/game-info/{game_id}", tags=["GAME"])
 def get_game_info(game_id: int, db: Session = Depends(get_db)):
