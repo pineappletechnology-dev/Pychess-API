@@ -1244,15 +1244,29 @@ def create_user(user: CreateUserRequest, db: Session = Depends(get_db)):
 
 @app.get("/get-users/", tags=['DB'])
 def get_users(db: Session = Depends(get_db)):
-    users = db.query(User).order_by(desc(User.rating)).all()
+    users = db.query(User).all()
+    user_list = []
 
-    return [
-        {
+    for user in users:
+        # Busca todas as partidas do usuário
+        games = db.query(Game).filter(Game.user_id == user.id).all()
+
+        # Faz a contagem de resultados
+        wins = sum(1 for g in games if g.status == game_states["PLAYER_WIN"])
+        losses = sum(1 for g in games if g.status == game_states["AI_WIN"])
+
+        # Calcula o rating dinamicamente
+        rating = wins - losses
+
+        user_list.append({
             "username": user.username,
-            "rating": user.rating
-        }
-        for user in users
-    ]
+            "rating": rating
+        })
+
+    # Ordena pelo rating (maior primeiro)
+    sorted_users = sorted(user_list, key=lambda x: x["rating"], reverse=True)
+    return sorted_users
+
 
 class LoginRequest(BaseModel):
     username: str
