@@ -391,6 +391,32 @@ def get_game_board(db: Session = Depends(get_db)):
         "fen": fen_string
     }
 
+
+
+@app.post("/finish_game/", tags=["GAME"])
+def finish_game(
+    user_id: int = Query(..., description="ID do usuário logado"),
+    winner: str = Query(..., description="Quem venceu: 'player' ou 'ai'"),
+    db: Session = Depends(get_db)
+):
+    """
+    Atualiza o status do jogo atual como encerrado.
+    """
+    game = db.query(Game).filter(Game.user_id == user_id, Game.status == game_states["IN_PROGRESS"]).first()
+    if not game:
+        raise HTTPException(status_code=404, detail="Nenhum jogo ativo encontrado para encerrar.")
+
+    if winner == "player":
+        game.status = game_states["PLAYER_WIN"]
+    elif winner == "ai":
+        game.status = game_states["AI_WIN"]
+    else:
+        raise HTTPException(status_code=400, detail="Parâmetro 'winner' inválido. Use 'player' ou 'ai'.")
+
+    db.commit()
+    return {"message": "Status do jogo atualizado com sucesso.", "status": game.status}
+
+
 class MoveData(BaseModel):
     move: str
     isPlayer: int
@@ -399,86 +425,48 @@ class MoveData(BaseModel):
 @app.post("/register_move/", tags=["GAME"])
 async def register_move(
     move_data: MoveData,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     user_id: int = Query(..., description="ID do usuário logado"),
 ):
     """
-    Registra uma jogada manualmente (sem o Stockfish jogar automaticamente).
+    Registra uma jogada manualmente (sem validação ou análise).
 
     - **move**: movimento no formato UCI (ex: `"e2e4"`)
     - **isPlayer**: 1 se for o jogador, 0 se for a IA
-    - **fen**: estado atual do tabuleiro após o movimento
+    - **fen**: estado atual do tabuleiro após o movimento (opcional)
     """
 
-    # 1️⃣ Busca o jogo ativo
+    # 1️⃣ Cria um novo jogo se não houver um em andamento
     game = db.query(Game).filter(Game.user_id == user_id, Game.status == game_states["IN_PROGRESS"]).first()
     if not game:
-        raise HTTPException(status_code=400, detail="Nenhum jogo ativo encontrado!")
+        game = Game(
+            user_id=user_id,
+            status=game_states["IN_PROGRESS"],
+        )
+        db.add(game)
+        db.commit()
+        db.refresh(game)
 
-    # 2️⃣ Busca o último estado salvo do tabuleiro
-    last_move = (
-        db.query(Move)
-        .filter(Move.game_id == game.id)
-        .order_by(Move.id.desc())
-        .first()
-    )
-
-    # 3️⃣ Cria o tabuleiro a partir do último FEN, ou inicializa se não houver jogadas ainda
-    board = chess.Board(last_move.board_string) if last_move and last_move.board_string else chess.Board()
-
-    # 4️⃣ Verifica se o movimento recebido é válido
-    if move_data.move not in [m.uci() for m in board.legal_moves]:
-        raise HTTPException(status_code=400, detail=f"Movimento inválido: {move_data.move}")
-
-    # 5️⃣ Aplica o movimento no tabuleiro
-    board.push(chess.Move.from_uci(move_data.move))
-
-    # 6️⃣ Atualiza o FEN
-    new_fen = board.fen()
-
-    # 7️⃣ Faz análise da jogada
-    analysis = analyze_move(move_data.move, db)
-    classification = analysis["classification"]
-
-    # 8️⃣ Cria o registro da jogada
+    # 2️⃣ Cria o registro da jogada
     new_move = Move(
         is_player=bool(move_data.isPlayer),
         move=move_data.move,
-        board_string=new_fen,
-        mv_quality=classification,
+        board_string=move_data.fen,  # usa o FEN recebido (ou None)
+        mv_quality=None,             # sem análise
         game_id=game.id,
-        created_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
     )
+
     db.add(new_move)
     db.commit()
 
-    # 9️⃣ Verifica xeque-mate
-    if board.is_checkmate():
-        if move_data.isPlayer:
-            game.status = game_states["PLAYER_WIN"]
-        else:
-            game.status = game_states["AI_WIN"]
-        db.commit()
-        rating(game.user_id)
-        return {
-            "message": "Xeque-mate! Jogo encerrado.",
-            "board_fen": new_fen,
-            "move": move_data.move,
-            "isPlayer": move_data.isPlayer,
-        }
-
-    # 🔟 Salva avaliação em background
-    background_tasks.add_task(calculate_and_save_evaluation, game.id, db)
-
-    await sio.emit("board_updated")
-
     return {
         "message": "Jogada registrada com sucesso.",
-        "board_fen": new_fen,
+        "game_id": game.id,
         "move": move_data.move,
         "isPlayer": move_data.isPlayer,
+        "fen": move_data.fen,
     }
+
 
 
 @app.post("/play_game/", tags=['GAME'])
@@ -573,7 +561,8 @@ async def play_game(
                     "message": "Xeque-mate! Pretas venceram!",
                     "board_fen": board.fen(),
                     "player_move": move,
-                    "stockfish_move": best_move
+                    "stockfish_move": best_move,
+                    "winner": "ai"
                 }
         else:
             return {
@@ -1027,7 +1016,8 @@ async def play_autonomous_game(move_req: MoveRequest, game_id: str = Query(...))
             "status": "fim",
             "message": "Xeque-mate! Brancas venceram!",
             "player_move": move,
-            "stockfish_move": None
+            "stockfish_move": None,
+            "winner": "player"
         }
 
     stockfish.set_fen_position(board.fen())
@@ -1043,7 +1033,8 @@ async def play_autonomous_game(move_req: MoveRequest, game_id: str = Query(...))
                 "status": "fim",
                 "message": "Xeque-mate! Pretas venceram!",
                 "player_move": move,
-                "stockfish_move": best_move
+                "stockfish_move": best_move,
+                "winner": "ai"
             }
 
     return {
