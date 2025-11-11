@@ -22,6 +22,7 @@ from starlette.status import HTTP_400_BAD_REQUEST
 from chess import Board
 from dateutil import parser
 
+
 from Model.users import User
 from Model.games import Game
 from Model.moves import Move
@@ -39,7 +40,7 @@ import chess.engine
 import socketio
 import asyncio
 import json
-from typing import Dict
+from typing import Dict, List, Optional
 
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
 
@@ -247,7 +248,7 @@ def set_difficulty(level: str):
 #     return {"message": f"Partida finalizada. Vencedor: {winner}", "game_id": game.id, "status": game.status}
 
 @app.post("/start_game/", tags=['GAME'])
-def start_game(user_id: int,  background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+def start_game(user_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """ Inicia um novo jogo de xadrez e registra a posição inicial. """
     
     # Verifica se há algum jogo em andamento
@@ -256,7 +257,10 @@ def start_game(user_id: int,  background_tasks: BackgroundTasks, db: Session = D
         raise HTTPException(status_code=400, detail="Já existe um jogo em andamento!")
 
     # Criar um novo jogo
-    new_game = Game(user_id=user_id)
+    new_game = Game(
+        user_id=user_id,
+        begin_time=datetime.now()  # ✅ Corrigido: passa datetime, não string
+    )
     db.add(new_game)
     db.commit()
     db.refresh(new_game)
@@ -275,13 +279,14 @@ def start_game(user_id: int,  background_tasks: BackgroundTasks, db: Session = D
     db.add(initial_move)
     db.commit()
 
+    # Avaliação inicial
     new_eval = Evaluation(
-            game_id=new_game.id,
-            evaluation=0,
-            depth=0,
-            win_probability_white=50,
-            win_probability_black=50,
-        )
+        game_id=new_game.id,
+        evaluation=0,
+        depth=0,
+        win_probability_white=50,
+        win_probability_black=50,
+    )
     db.add(new_eval)
     db.commit()
 
@@ -393,28 +398,28 @@ def get_game_board(db: Session = Depends(get_db)):
 
 
 
-@app.post("/finish_game/", tags=["GAME"])
-def finish_game(
-    user_id: int = Query(..., description="ID do usuário logado"),
-    winner: str = Query(..., description="Quem venceu: 'player' ou 'ai'"),
-    db: Session = Depends(get_db)
-):
-    """
-    Atualiza o status do jogo atual como encerrado.
-    """
-    game = db.query(Game).filter(Game.user_id == user_id, Game.status == game_states["IN_PROGRESS"]).first()
-    if not game:
-        raise HTTPException(status_code=404, detail="Nenhum jogo ativo encontrado para encerrar.")
+# @app.post("/finish_game/", tags=["GAME"])
+# def finish_game(
+#     user_id: int = Query(..., description="ID do usuário logado"),
+#     winner: str = Query(..., description="Quem venceu: 'player' ou 'ai'"),
+#     db: Session = Depends(get_db)
+# ):
+#     """
+#     Atualiza o status do jogo atual como encerrado.
+#     """
+#     game = db.query(Game).filter(Game.user_id == user_id, Game.status == game_states["IN_PROGRESS"]).first()
+#     if not game:
+#         raise HTTPException(status_code=404, detail="Nenhum jogo ativo encontrado para encerrar.")
 
-    if winner == "player":
-        game.status = game_states["PLAYER_WIN"]
-    elif winner == "ai":
-        game.status = game_states["AI_WIN"]
-    else:
-        raise HTTPException(status_code=400, detail="Parâmetro 'winner' inválido. Use 'player' ou 'ai'.")
+#     if winner == "player":
+#         game.status = game_states["PLAYER_WIN"]
+#     elif winner == "ai":
+#         game.status = game_states["AI_WIN"]
+#     else:
+#         raise HTTPException(status_code=400, detail="Parâmetro 'winner' inválido. Use 'player' ou 'ai'.")
 
-    db.commit()
-    return {"message": "Status do jogo atualizado com sucesso.", "status": game.status}
+#     db.commit()
+#     return {"message": "Status do jogo atualizado com sucesso.", "status": game.status}
 
 
 class MoveData(BaseModel):
@@ -424,49 +429,52 @@ class MoveData(BaseModel):
 
 @app.post("/register_move/", tags=["GAME"])
 async def register_move(
-    move_data: MoveData,
+    moves: List[MoveData],
     db: Session = Depends(get_db),
     user_id: int = Query(..., description="ID do usuário logado"),
+    winner: str | None = Query(None, description="Pode ser 'PLAYER' ou 'AI'"),
 ):
     """
-    Registra uma jogada manualmente (sem validação ou análise).
-
-    - **move**: movimento no formato UCI (ex: `"e2e4"`)
-    - **isPlayer**: 1 se for o jogador, 0 se for a IA
-    - **fen**: estado atual do tabuleiro após o movimento (opcional)
+    Registra várias jogadas de uma só vez e finaliza o jogo (opcionalmente com o vencedor).
     """
+    # ✅ Busca jogo ativo
+    game = db.query(Game).filter(
+        Game.user_id == user_id,
+        Game.status == game_states["IN_PROGRESS"]
+    ).first()
 
-    # 1️⃣ Cria um novo jogo se não houver um em andamento
-    game = db.query(Game).filter(Game.user_id == user_id, Game.status == game_states["IN_PROGRESS"]).first()
     if not game:
-        game = Game(
-            user_id=user_id,
-            status=game_states["IN_PROGRESS"],
+        raise HTTPException(status_code=400, detail="Nenhum jogo ativo encontrado.")
+
+    # ✅ Cria os registros de jogadas
+    for move in moves:
+        new_move = Move(
+            game_id=game.id,
+            move=move.move,
+            is_player=bool(move.isPlayer),
+            board_string=move.fen,
+            created_at=datetime.now(),  # ✅ Corrigido: datetime, não string
         )
-        db.add(game)
-        db.commit()
-        db.refresh(game)
+        db.add(new_move)
 
-    # 2️⃣ Cria o registro da jogada
-    new_move = Move(
-        is_player=bool(move_data.isPlayer),
-        move=move_data.move,
-        board_string=move_data.fen,  # usa o FEN recebido (ou None)
-        mv_quality=None,             # sem análise
-        game_id=game.id,
-    )
-
-    db.add(new_move)
     db.commit()
 
-    return {
-        "message": "Jogada registrada com sucesso.",
-        "game_id": game.id,
-        "move": move_data.move,
-        "isPlayer": move_data.isPlayer,
-        "fen": move_data.fen,
-    }
+    # ✅ Atualiza o status do jogo e a data de término
+    if winner:
+        if winner.upper() == "PLAYER":
+            game.status = game_states["PLAYER_WIN"]
+        elif winner.upper() == "AI":
+            game.status = game_states["AI_WIN"]
 
+        game.end_time = datetime.now()  # ✅ Marca quando o jogo terminou
+        db.commit()
+
+    return {
+        "message": f"{len(moves)} jogadas registradas com sucesso!",
+        "game_id": game.id,
+        "winner": winner or "IN_PROGRESS",
+        "end_time": game.end_time
+    }
 
 
 @app.post("/play_game/", tags=['GAME'])
@@ -1281,7 +1289,8 @@ def get_user_info(
     db: Session = Depends(get_db)
 ):
     """
-    Retorna informações do usuário e estatísticas de partidas calculadas dinamicamente.
+    Retorna informações do usuário e estatísticas de partidas calculadas dinamicamente,
+    incluindo o tempo médio de jogo (em minutos).
     """
 
     # ✅ Se um user_id for passado, buscar o usuário correspondente
@@ -1294,13 +1303,22 @@ def get_user_info(
     # ✅ Busca todas as partidas do usuário
     games = db.query(Game).filter(Game.user_id == user.id).all()
 
-    # ✅ Calcula estatísticas
+    # ✅ Calcula estatísticas básicas
     wins = sum(1 for g in games if g.status == game_states["PLAYER_WIN"])
     losses = sum(1 for g in games if g.status == game_states["AI_WIN"])
     draws = sum(1 for g in games if g.status == game_states["DRAW"])
     total_games = len(games)
 
-    # ✅ Retorna os dados combinados
+    # ✅ Calcula tempo médio de jogo (somente partidas com begin_time e end_time válidos)
+    times = [
+        (g.end_time - g.begin_time).total_seconds()
+        for g in games
+        if g.begin_time and g.end_time
+    ]
+
+    average_game_time = round(sum(times) / len(times) / 60, 2) if times else 0.0
+
+    # ✅ Retorna dados combinados
     return {
         "id": user.id,
         "username": user.username,
@@ -1310,6 +1328,7 @@ def get_user_info(
         "draws": draws,
         "total_games": total_games,
         "rating": user.rating,
+        "averageGameTime": average_game_time,  # em minutos
     }
 
 
