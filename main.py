@@ -480,39 +480,45 @@ async def register_move(
 @app.post("/play_game/", tags=['GAME'])
 async def play_game(
     move: str,
-    background_tasks: BackgroundTasks, db: Session = Depends(get_db),
-    user_id: int = Query(..., description="ID do usuário logado"),
-    ):
-    """ O usuário joga, e o Stockfish responde com a melhor jogada, verificando capturas. """
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    user_id: int = Query(..., description="ID do usuário logado")
+):
+    """ O usuário joga, e o Stockfish responde. A primeira jogada das pretas é forçada. """
 
-    # Verifica se há um jogo ativo
-    game = db.query(Game).filter(Game.user_id == user_id, Game.status == game_states["IN_PROGRESS"]).first()
+    # 🔧 Jogada das pretas fixa para a primeira vez que o Stockfish joga
+    FORCED_FIRST_BLACK_MOVE = "e7e6"
+
+    # -----------------------------------------------------------
+    # Carregar jogo
+    # -----------------------------------------------------------
+    game = db.query(Game).filter(
+        Game.user_id == user_id,
+        Game.status == game_states["IN_PROGRESS"]
+    ).first()
+
     if not game:
         raise HTTPException(status_code=400, detail="Nenhum jogo ativo encontrado!")
 
-    # Obtém o último estado salvo do tabuleiro
+    # Último estado salvo
     last_move = db.query(Move).filter(Move.game_id == game.id).order_by(Move.id.desc()).first()
 
-    # Se houver um estado salvo, carregamos ele; caso contrário, criamos um novo tabuleiro
-    board = chess.Board(last_move.board_string) if last_move and last_move.board_string else chess.Board()
+    board = chess.Board(last_move.board_string) if last_move else chess.Board()
 
-    for m in board.legal_moves:
-        print(m.uci())
-    # Verifica se a jogada do jogador é válida
+    # -----------------------------------------------------------
+    # Jogada do player
+    # -----------------------------------------------------------
     if move not in [m.uci() for m in board.legal_moves]:
         raise HTTPException(status_code=400, detail="Movimento do jogador inválido!")
 
-    # Aplica o movimento do jogador no tabuleiro
     board.push(chess.Move.from_uci(move))
-
-    # Atualiza o Stockfish com o novo estado do jogo
     stockfish.set_fen_position(board.fen())
 
-    # Análise da jogada
+    # Classificação do movimento
     analysis = analyze_move(move, db)
     classification = analysis["classification"]
 
-    # Salva o movimento do jogador no banco
+    # Salvar jogada do jogador
     new_move = Move(
         is_player=True,
         move=move,
@@ -524,9 +530,9 @@ async def play_game(
     db.add(new_move)
     db.commit()
 
-    # Verifica xeque-mate após o movimento do jogador
+    # Verifica xeque-mate do jogador
     if board.is_checkmate():
-        game.status = game_states["PLAYER_WIN"]  # Brancas venceram
+        game.status = game_states["PLAYER_WIN"]
         db.commit()
         rating(game.user_id)
 
@@ -534,52 +540,60 @@ async def play_game(
             "message": "Xeque-mate! Brancas venceram!",
             "board_fen": board.fen(),
             "player_move": move,
-            "stockfish_move": None
+            "stockfish_move": None,
+            "winner": "player"
         }
 
-    # Stockfish responde com o melhor movimento
-    best_move = stockfish.get_best_move()
-    if best_move:
-        stockfish_move = chess.Move.from_uci(best_move)
+    # -----------------------------------------------------------
+    # Jogada do Stockfish (PRETAS)
+    # -----------------------------------------------------------
+    total_moves = db.query(Move).filter(Move.game_id == game.id).count()
 
-        # Se for válido, aplicamos no tabuleiro
-        if stockfish_move in board.legal_moves:
-            board.push(stockfish_move)
-            stockfish.set_fen_position(board.fen())
+    # Jogada forçada das pretas
+    print(f'total moves: {total_moves}, do tipo {type(total_moves)}')
+    # stockfish_move_uci = FORCED_FIRST_BLACK_MOVE
+    if total_moves <= 2:
+        # Jogada forçada das pretas
+        stockfish_move_uci = FORCED_FIRST_BLACK_MOVE
+    else:
+        # Jogada normal do Stockfish
+        stockfish_move_uci = stockfish.get_best_move()
 
-            # Salva a jogada do Stockfish
-            sf_move = Move(
-                is_player=False,
-                move=best_move,
-                board_string=board.fen(),
-                game_id=game.id,
-                mv_quality=None,
-                created_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            )
-            db.add(sf_move)
-            db.commit()
+    stockfish_move = chess.Move.from_uci(stockfish_move_uci)
 
-            # Verifica xeque-mate após a jogada do Stockfish
-            if board.is_checkmate():
-                game.status = game_states["AI_WIN"]  # Pretas venceram
-                db.commit()
-                rating(game.user_id)
+    # Aplica direto SEM verificações adicionais
+    board.push(stockfish_move)
+    stockfish.set_fen_position(board.fen())
 
-                return {
-                    "message": "Xeque-mate! Pretas venceram!",
-                    "board_fen": board.fen(),
-                    "player_move": move,
-                    "stockfish_move": best_move,
-                    "winner": "ai"
-                }
-        else:
-            return {
-                "message": "Movimento do Stockfish inválido. Tentando novamente...",
-                "board_fen": board.fen(),
-                "player_move": move,
-                "stockfish_move": None
-            }
-        
+    # Salvar jogada do Stockfish
+    sf_move = Move(
+        is_player=False,
+        move=stockfish_move_uci,
+        board_string=board.fen(),
+        game_id=game.id,
+        mv_quality=None,
+        created_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    )
+    db.add(sf_move)
+    db.commit()
+
+    # Xeque-mate após jogada das pretas
+    if board.is_checkmate():
+        game.status = game_states["AI_WIN"]
+        db.commit()
+        rating(game.user_id)
+
+        return {
+            "message": "Xeque-mate! Pretas venceram!",
+            "board_fen": board.fen(),
+            "player_move": move,
+            "stockfish_move": stockfish_move_uci,
+            "winner": "ai"
+        }
+
+    # -----------------------------------------------------------
+    # Avaliação
+    # -----------------------------------------------------------
     background_tasks.add_task(calculate_and_save_evaluation, game.id, db)
 
     await sio.emit("board_updated")
@@ -588,7 +602,7 @@ async def play_game(
         "message": "Movimentos realizados!",
         "board_fen": board.fen(),
         "player_move": move,
-        "stockfish_move": best_move
+        "stockfish_move": stockfish_move_uci
     }
 
 def calculate_and_save_evaluation(game_id: int, db: Session):
