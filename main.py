@@ -1341,7 +1341,6 @@ def get_user_history(
     Retorna o histórico de partidas do usuário, incluindo resultado e duração.
     """
 
-    # Busca todas as partidas do usuário
     games = (
         db.query(Game)
         .filter(Game.user_id == user_id)
@@ -1355,14 +1354,12 @@ def get_user_history(
             status_code=404
         )
 
-    result_list = []
-
-    # Busca o nome do usuário uma única vez (evita várias queries)
     user = db.query(User).filter(User.id == user_id).first()
     username = user.username if user else "Desconhecido"
 
+    result_list = []
+
     for game in games:
-        # Determina o resultado
         if game.status == game_states["AI_WIN"]:
             result = "Derrota"
         elif game.status == game_states["PLAYER_WIN"]:
@@ -1370,39 +1367,24 @@ def get_user_history(
         else:
             result = "Em andamento"
 
-        # Busca o primeiro e o último movimento para calcular a duração
-        first_move: Optional[Move] = (
-            db.query(Move)
-            .filter(Move.game_id == game.id)
-            .order_by(Move.created_at.asc())
-            .first()
-        )
-        last_move: Optional[Move] = (
-            db.query(Move)
-            .filter(Move.game_id == game.id)
-            .order_by(Move.created_at.desc())
-            .first()
-        )
-
         duration_str = "00:00:00"
 
-        if first_move and last_move:
-            first_created = first_move.created_at
-            last_created = last_move.created_at
-
+        if game.begin_time and game.end_time:
             try:
-                first_dt = parser.parse(first_created) if isinstance(first_created, str) else first_created
-                last_dt = parser.parse(last_created) if isinstance(last_created, str) else last_created
-                duration = last_dt - first_dt
+                begin_dt = parser.parse(game.begin_time) if isinstance(game.begin_time, str) else game.begin_time
+                end_dt = parser.parse(game.end_time) if isinstance(game.end_time, str) else game.end_time
+
+                duration = end_dt - begin_dt
                 total_seconds = int(duration.total_seconds())
                 hours = total_seconds // 3600
                 minutes = (total_seconds % 3600) // 60
                 seconds = total_seconds % 60
+
                 duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-            except Exception:
+            except Exception as e:
+                print(f"Erro ao calcular duração do jogo {game.id}: {e}")
                 duration_str = "00:00:00"
 
-        # Adiciona a partida na lista
         result_list.append({
             "id": game.id,
             "username": username,
@@ -1412,39 +1394,47 @@ def get_user_history(
 
     return result_list
 
+
 @app.get("/game-info/{game_id}", tags=["GAME"])
 def get_game_info(game_id: int, db: Session = Depends(get_db)):
+    """
+    Retorna informações detalhadas de uma partida específica.
+    Inclui resultado e duração com base no begin_time e end_time.
+    """
     game = db.query(Game).filter(Game.id == game_id).first()
+
     if not game:
-        raise HTTPException(status_code=404, detail="Jogo não encontrado")
+        return JSONResponse(
+            content={"detail": "Partida não encontrada."},
+            status_code=404
+        )
 
-    first_move = (
-        db.query(Move)
-        .filter(Move.game_id == game_id)
-        .order_by(Move.created_at.asc())
-        .first()
-    )
-    last_move = (
-        db.query(Move)
-        .filter(Move.game_id == game_id)
-        .order_by(Move.created_at.desc())
-        .first()
-    )
-
-    if first_move and last_move:
-        fmt = "%Y-%m-%d %H:%M:%S"  # ou ajuste para o tipo real
-        start = datetime.strptime(first_move.created_at, fmt)
-        end = datetime.strptime(last_move.created_at, fmt)
-        duration = end - start
-        total_seconds = int(duration.total_seconds())
-        minutes = total_seconds // 60
-        duration_str = f"{minutes} minutos"
+    # Determina o resultado
+    if game.status == game_states["AI_WIN"]:
+        result = "Derrota"
+    elif game.status == game_states["PLAYER_WIN"]:
+        result = "Vitória"
     else:
-        duration_str = "Desconhecido"
+        result = "Em andamento"
 
-    result = "Vitória" if game.status == game_states["PLAYER_WIN"] else "Derrota"
+    # Calcula a duração com base em begin_time e end_time
+    duration_str = "00:00:00"
+    if game.begin_time and game.end_time:
+        try:
+            duration = game.end_time - game.begin_time
+            total_seconds = int(duration.total_seconds())
+            hours = total_seconds // 3600
+            minutes = (total_seconds % 3600) // 60
+            seconds = total_seconds % 60
+            duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        except Exception:
+            duration_str = "00:00:00"
 
-    return {"result": result, "duration": duration_str}
+    return {
+        "result": result,
+        "duration": duration_str
+    }
+
 
 
 @app.post("/forgot-password/", tags=['DB'])
