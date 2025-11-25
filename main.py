@@ -843,16 +843,9 @@ def game_history(db: Session = Depends(get_db)):
 
 @app.get("/last_game/", tags=["GAME"])
 async def get_last_game(
-    user_id: int = Query(..., description="ID do usuário logado"),
+    user_id: int = Query(...),
     db: Session = Depends(get_db)
-    ):
-    """
-    Retorna a última partida concluída.
-    """
-
-    # Buscando user id
-
-    # Busca a última partida
+):
     last_game = (
         db.query(Game)
         .filter(
@@ -862,56 +855,29 @@ async def get_last_game(
         .order_by(Game.id.desc())
         .first()
     )
+
     if not last_game:
         return JSONResponse(content={"detail": "Nenhuma partida encontrada."}, status_code=404)
-    # Pega usuário
-    game_user = db.query(User).filter(User.id == user_id).first()
-    username = game_user.username if game_user else "Desconhecido"
 
-    # Determina resultado
-    result = "Derrota" if last_game.status == game_states.get("AI_WIN") else "Vitória"
+    user = db.query(User).filter(User.id == user_id).first()
+    username = user.username if user else "Desconhecido"
 
-    # Busca primeiros e últimos movimentos
-    first_move = (
-        db.query(Move)
-        .filter(Move.game_id == last_game.id)
-        .order_by(Move.created_at.asc())
-        .first()
-    )
-    last_move = (
-        db.query(Move)
-        .filter(Move.game_id == last_game.id)
-        .order_by(Move.created_at.desc())
-        .first()
-    )
+    result = "Derrota" if last_game.status == game_states["AI_WIN"] else "Vitória"
 
-    # Calcula duração
+    # -----------------------------
+    # 🔥 DURAÇÃO DIRETA: end_time - begin_time
+    # -----------------------------
     duration_str = "00:00:00"
-    try:
-        if (
-            first_move is not None and
-            last_move is not None and
-            getattr(first_move, "created_at", None) is not None and
-            getattr(last_move, "created_at", None) is not None
-        ):
-            first_dt = parser.parse(first_move.created_at) if isinstance(first_move.created_at, str) else first_move.created_at
-            last_dt = parser.parse(last_move.created_at) if isinstance(last_move.created_at, str) else last_move.created_at
+    if last_game.begin_time and last_game.end_time:
+        duration = last_game.end_time - last_game.begin_time
 
-            duration = last_dt - first_dt
-            total_seconds = int(duration.total_seconds())
-            hours = total_seconds // 3600
-            minutes = (total_seconds % 3600) // 60
-            seconds = total_seconds % 60
-            duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-    except Exception as e:
-        print("Erro ao calcular duração:", e)
+        total_seconds = int(duration.total_seconds())
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
 
-    print({
-        "username": username,
-        "result": result,
-        "duration": duration_str,
-        "id": last_game.id
-    })
+        duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
     return {
         "username": username,
         "result": result,
